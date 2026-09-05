@@ -1,0 +1,10 @@
+{
+  "name": "digital-logic-sim-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "test": "node --test",
+    "build": "node build.js"
+  }
+}

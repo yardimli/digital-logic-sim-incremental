@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#10131a" />
+  <meta name="description" content="A fast, browser-based digital logic playground." />
+  <title>Digital Logic Sim</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand" aria-label="Digital Logic Sim">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>Digital Logic <b>Sim</b></span>
+      </div>
+      <div id="circuit-tabs" class="circuit-tabs" aria-label="Open circuits"></div>
+      <div class="toolbar" aria-label="Circuit controls">
+        <button id="undo" class="icon-button" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+        <button id="redo" class="icon-button" title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
+        <span class="divider"></span>
+        <button id="save" class="tool-button">Save</button>
+        <label class="tool-button file-button">Open<input id="open-file" type="file" accept="application/json,.json" /></label>
+        <button id="clear" class="icon-button danger" title="Clear circuit" aria-label="Clear circuit">⌫</button>
+      </div>
+    </header>
+
+    <aside class="library-panel">
+      <div class="library-head">
+        <p class="eyebrow">Component library</p>
+        <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Find a component" /></label>
+      </div>
+      <div id="component-library" class="component-library"></div>
+      <div class="library-tip"><kbd>Drag</kbd> to place · Drag output to input</div>
+    </aside>
+
+    <main id="workspace" class="workspace" tabindex="0" aria-label="Circuit workspace">
+      <svg id="wires" class="wires" aria-hidden="true"><g id="wire-layer"></g><path id="draft-wire" class="wire draft" d="" /></svg>
+      <div id="nodes" class="nodes"></div>
+      <div id="empty-state" class="empty-state" hidden>
+        <div class="empty-icon">＋</div>
+        <strong>Start a new circuit</strong>
+        <span>Drag a component here from the library</span>
+      </div>
+      <div class="canvas-actions">
+        <button id="zoom-out" aria-label="Zoom out">−</button>
+        <span id="zoom-label">100%</span>
+        <button id="zoom-in" aria-label="Zoom in">＋</button>
+        <button id="fit" aria-label="Reset view">⌂</button>
+      </div>
+      <div id="simulation-error" class="simulation-error" role="alert" hidden></div>
+    </main>
+
+    <aside id="inspector" class="inspector-panel">
+      <div class="inspector-empty">
+        <span class="selection-glyph">◇</span>
+        <strong>Nothing selected</strong>
+        <p>Select a component to see its details.</p>
+      </div>
+    </aside>
+
+    <footer class="statusbar">
+      <div class="sim-controls">
+        <label class="clock-control" for="clock-speed">
+          <span>Clock speed</span>
+          <span class="clock-input"><input id="clock-speed" type="number" min="1" max="100" step="1" value="5" aria-label="Clock speed in hertz" /><b>Hz</b></span>
+        </label>
+      </div>
+      <div class="sim-stats"><span class="sim-actions"><button id="toggle-simulation" aria-label="Pause simulation" title="Pause simulation">Ⅱ</button><button id="restart-simulation" aria-label="Restart simulation" title="Restart simulation">↻</button></span><span class="sim-metric"><i class="live-dot"></i><span id="simulation-status">Simulation running</span></span><span class="sim-metric" id="node-count">0 components</span><span class="sim-metric" id="wire-count">0 wires</span></div>
+      <div class="help-text"><kbd>Del</kbd> remove <kbd>Esc</kbd> cancel wire</div>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
