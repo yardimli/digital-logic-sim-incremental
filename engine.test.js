@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, simulate, executionBatches, makeExample } from './engine.js';
+import { evaluate, simulate, executionBatches, propagatingViaIds, makeExample } from './engine.js';
 
 test('logic gates evaluate their truth tables', () => {
   assert.deepEqual(evaluate('AND', [true, true]), [true]);
@@ -93,4 +93,28 @@ test('fan-out destinations execute together in the same simulation interval', ()
     ['left', 'right'],
     ['left-led', 'right-led'],
   ]);
+});
+
+test('4 by 4 LED matrix lights active row and column intersections', () => {
+  assert.deepEqual(evaluate('LED_MATRIX', [true, false, true, false, false, true, false, true]), [
+    false, true, false, true,
+    false, false, false, false,
+    false, true, false, true,
+    false, false, false, false,
+  ]);
+});
+
+test('an animated signal activates every connected via junction', () => {
+  const nodes = [
+    { id: 'source', type: 'INPUT', outputs: [true] },
+    { id: 'via-1', type: 'VIA', outputs: [true, true, true, true] },
+    { id: 'via-2', type: 'VIA', outputs: [true, true, true, true] },
+    { id: 'led', type: 'LED', outputs: [true] },
+  ];
+  const wires = [
+    { from: { node: 'source', pin: 0 }, to: { node: 'via-1', pin: 0 } },
+    { from: { node: 'via-1', pin: 1 }, to: { node: 'via-2', pin: 0 } },
+    { from: { node: 'via-2', pin: 1 }, to: { node: 'led', pin: 0 } },
+  ];
+  assert.deepEqual([...propagatingViaIds(nodes, wires, new Set(['source']))], ['via-1', 'via-2']);
 });

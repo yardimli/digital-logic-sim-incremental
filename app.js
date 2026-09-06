@@ -1,4 +1,5 @@
-import { COMPONENTS, simulate, executionBatches, makeExample } from './engine.js';
+import { COMPONENTS, simulate, executionBatches, propagatingViaIds, makeExample } from './engine.js';
+import { routeWire, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear } from './router.js';
 
 const $ = selector => document.querySelector(selector);
 const workspace = $('#workspace');
@@ -15,12 +16,14 @@ const restoredWorkspace = readStoredWorkspace();
 const starter = makeExample();
 const initialTabs = restoredWorkspace?.tabs?.length ? restoredWorkspace.tabs : [{ id: uid('tab'), ...starter, panX: 0, panY: 0, zoom: 1 }];
 const initialTab = initialTabs.find(tab => tab.id === restoredWorkspace?.activeTabId) || initialTabs[0];
-const state = { name: initialTab.name, nodes: initialTab.nodes, wires: initialTab.wires, tabs: initialTabs, activeTabId: initialTab.id, selectedNode: null, selectedWire: null, pending: null, hintNode: null, runningNodes: new Set(), executionIndex: 0, executionPlan: [], cycleValues: new Map(), energizedNodes: new Set(), clock: false, clockHz: restoredWorkspace?.clockHz || 5, isPlaying: true, simulationError: null, zoom: initialTab.zoom || 1, panX: initialTab.panX || 0, panY: initialTab.panY || 0, history: [], future: [] };
+const state = { name: initialTab.name, nodes: initialTab.nodes, wires: initialTab.wires, tabs: initialTabs, activeTabId: initialTab.id, selectedNode: null, selectedWire: null, pending: null, hintNode: null, runningNodes: new Set(), executionIndex: 0, executionPlan: [], cycleValues: new Map(), energizedNodes: new Set(), clock: false, clockHz: restoredWorkspace?.clockHz || 5, wireStyle: restoredWorkspace?.wireStyle === 'curved' ? 'curved' : 'orthogonal', isPlaying: true, simulationError: null, zoom: initialTab.zoom || 1, panX: initialTab.panX || 0, panY: initialTab.panY || 0, history: [], future: [] };
 let toastTimer;
 const objectTokens = new WeakMap();
 let nextObjectToken = 1;
 let lastPersistedWorkspace = '';
 let wireDragCleanup = null;
+let wireRouteLayout = '';
+const wireRouteCache = new Map();
 
 function uid(prefix) { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`; }
 function readStoredWorkspace() {
@@ -28,7 +31,7 @@ function readStoredWorkspace() {
     const value = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (!value || !Array.isArray(value.tabs)) return null;
     const tabs = value.tabs.filter(tab => tab && Array.isArray(tab.nodes) && Array.isArray(tab.wires)).map((tab, index) => ({ id: String(tab.id || uid('tab')), name: String(tab.name || `Circuit ${index + 1}`), nodes: tab.nodes.filter(node => COMPONENTS[node.type]).map(node => ({ ...node, x: Number(node.x) || 0, y: Number(node.y) || 0, value: node.type === 'INPUT' ? Boolean(node.value) : false })), wires: tab.wires, panX: Number(tab.panX) || 0, panY: Number(tab.panY) || 0, zoom: Number(tab.zoom) || 1 }));
-    return tabs.length ? { tabs, activeTabId: value.activeTabId, clockHz: Math.min(100, Math.max(1, Number(value.clockHz) || 5)) } : null;
+    return tabs.length ? { tabs, activeTabId: value.activeTabId, clockHz: Math.min(100, Math.max(1, Number(value.clockHz) || 5)), wireStyle: value.wireStyle === 'curved' ? 'curved' : 'orthogonal' } : null;
   } catch { return null; }
 }
 function activeTab() { return state.tabs.find(tab => tab.id === state.activeTabId); }
@@ -37,7 +40,7 @@ function serializableTab(tab) { return { id: tab.id, name: tab.name, panX: tab.p
 function persistWorkspace() {
   try {
     syncActiveTab();
-    const serialized = JSON.stringify({ version: 1, activeTabId: state.activeTabId, clockHz: state.clockHz, tabs: state.tabs.map(serializableTab) });
+    const serialized = JSON.stringify({ version: 1, activeTabId: state.activeTabId, clockHz: state.clockHz, wireStyle: state.wireStyle, tabs: state.tabs.map(serializableTab) });
     if (serialized !== lastPersistedWorkspace) { localStorage.setItem(STORAGE_KEY, serialized); lastPersistedWorkspace = serialized; }
   } catch { /* Storage can be unavailable in privacy-restricted contexts. */ }
 }
@@ -127,7 +130,10 @@ function buildLibrary(filter = '') {
   }
 }
 
-function nodeDimensions(type) { return type === 'VIA' ? { width: VIA_SIZE, height: VIA_SIZE } : { width: NODE_WIDTH, height: NODE_HEIGHT }; }
+function nodeDimensions(type) {
+  const def = COMPONENTS[type];
+  return type === 'VIA' ? { width: VIA_SIZE, height: VIA_SIZE } : { width: def.width || NODE_WIDTH, height: def.height || NODE_HEIGHT };
+}
 
 function addNode(type, position = null) {
   if (!COMPONENTS[type]) return;
@@ -140,35 +146,63 @@ function addNode(type, position = null) {
   if (innerWidth <= 650) $('.library-panel').classList.remove('open');
 }
 
-function portY(index, count, type) { return type === 'VIA' ? 50 : count === 1 ? 65 : 52 + index * (36 / Math.max(1, count - 1)); }
-function nodePortPosition(node, side, pin) {
+function connectorSide(node, kind, pin) {
+  return COMPONENTS[node.type][`${kind}Sides`]?.[pin] || (kind === 'input' ? 'left' : 'right');
+}
+function connectorOffset(node, kind, pin) {
   const def = COMPONENTS[node.type];
-  const count = side === 'input' ? def.inputs : def.outputs;
+  const count = kind === 'input' ? def.inputs : def.outputs;
+  const physicalSide = connectorSide(node, kind, pin);
+  const peers = Array.from({ length: count }, (_, index) => index).filter(index => connectorSide(node, kind, index) === physicalSide);
+  const position = peers.indexOf(pin);
+  if (physicalSide === 'left' || physicalSide === 'right') return peers.length === 1 ? 65 : 44 + position * (44 / Math.max(1, peers.length - 1));
+  return peers.length === 1 ? 50 : 22 + position * (56 / Math.max(1, peers.length - 1));
+}
+function nodePortPosition(node, kind, pin) {
+  const def = COMPONENTS[node.type];
   const dimensions = nodeDimensions(node.type);
   if (node.type === 'VIA') {
     const positions = [
-      { x: node.x + dimensions.width / 2, y: node.y },
-      { x: node.x + dimensions.width, y: node.y + dimensions.height / 2 },
-      { x: node.x + dimensions.width / 2, y: node.y + dimensions.height },
-      { x: node.x, y: node.y + dimensions.height / 2 },
+      { x: node.x + dimensions.width / 2, y: node.y, side: 'top' },
+      { x: node.x + dimensions.width, y: node.y + dimensions.height / 2, side: 'right' },
+      { x: node.x + dimensions.width / 2, y: node.y + dimensions.height, side: 'bottom' },
+      { x: node.x, y: node.y + dimensions.height / 2, side: 'left' },
     ];
     return positions[pin] || positions[0];
   }
-  return { x: node.x + (side === 'input' ? 0 : dimensions.width), y: node.y + dimensions.height * portY(pin, count, node.type) / 100 };
+  const side = connectorSide(node, kind, pin);
+  const offset = connectorOffset(node, kind, pin) / 100;
+  if (side === 'top') return { x: node.x + dimensions.width * offset, y: node.y, side };
+  if (side === 'bottom') return { x: node.x + dimensions.width * offset, y: node.y + dimensions.height, side };
+  return { x: node.x + (side === 'left' ? 0 : dimensions.width), y: node.y + dimensions.height * offset, side };
 }
-function curve(a, b) { const bend = Math.max(55, Math.abs(b.x - a.x) * .45); return `M ${a.x} ${a.y} C ${a.x + bend} ${a.y}, ${b.x - bend} ${b.y}, ${b.x} ${b.y}`; }
+function wireRoute(a, b, excludedNodeIds = [], occupiedSegments = []) {
+  const excluded = new Set(excludedNodeIds);
+  const obstacles = state.nodes.filter(node => !excluded.has(node.id)).map(node => { const dimensions = nodeDimensions(node.type); return { left: node.x, top: node.y, right: node.x + dimensions.width, bottom: node.y + dimensions.height }; });
+  if (state.wireStyle === 'curved' && directBezierIsClear(a, b, obstacles, 18)) return { points: [a, b], path: directBezierPath(a, b) };
+  const points = routeWire(a, b, obstacles, state.wireStyle === 'curved' ? 30 : 14, 18, occupiedSegments);
+  return { points, path: state.wireStyle === 'curved' ? curvedPath(points) : orthogonalPath(points) };
+}
 function objectToken(value) { if (!objectTokens.has(value)) objectTokens.set(value, nextObjectToken++); return objectTokens.get(value); }
 
 function renderWires() {
+  const routeLayout = `${state.wireStyle}|${state.nodes.map(node => `${node.id}:${node.type}:${node.x}:${node.y}`).join('|')}|${state.wires.map(wire => `${wire.id}:${wire.from.node}:${wire.from.pin}:${wire.to.node}:${wire.to.pin}`).join('|')}`;
+  if (routeLayout !== wireRouteLayout) { wireRouteLayout = routeLayout; wireRouteCache.clear(); }
   const liveIds = new Set(state.wires.map(wire => wire.id));
   for (const child of [...wireLayer.children]) if (!liveIds.has(child.dataset.id)) child.remove();
   const rendered = new Map([...wireLayer.children].map(child => [child.dataset.id, child]));
+  const occupiedSegments = [];
+  const animatedVias = propagatingViaIds(state.nodes, state.wires, state.runningNodes);
   for (const wire of state.wires) {
     const source = state.nodes.find(n => n.id === wire.from.node); const target = state.nodes.find(n => n.id === wire.to.node);
     if (!source || !target) continue;
-    const path = curve(nodePortPosition(source, 'output', wire.from.pin), nodePortPosition(target, 'input', wire.to.pin));
+    const routeKey = `${wire.id}:${wire.from.node}:${wire.from.pin}:${wire.to.node}:${wire.to.pin}`;
+    let route = wireRouteCache.get(routeKey);
+    if (!route) { route = wireRoute(nodePortPosition(source, 'output', wire.from.pin), nodePortPosition(target, 'input', wire.to.pin), [source.id, target.id], state.wireStyle === 'orthogonal' ? occupiedSegments : []); wireRouteCache.set(routeKey, route); }
+    if (state.wireStyle === 'orthogonal') for (let index = 1; index < route.points.length; index++) occupiedSegments.push({ a: route.points[index - 1], b: route.points[index] });
+    const path = route.path;
     const active = Boolean(source.outputs?.[wire.from.pin]);
-    const processing = state.runningNodes.has(source.id) && active;
+    const processing = (state.runningNodes.has(source.id) && active) || animatedVias.has(source.id) || animatedVias.has(target.id);
     const renderKey = `${path}|${active}|${processing}|${state.selectedWire === wire.id}`;
     let group = rendered.get(wire.id);
     if (!group) {
@@ -184,8 +218,9 @@ function renderWires() {
 }
 
 function makePin(node, side, index, count) {
-  const pin = document.createElement('button'); pin.className = `pin ${side}${side === 'output' && node.outputs?.[index] ? ' on' : ''}${side === 'input' && node.inputs?.[index] ? ' on' : ''}`;
-  pin.style.setProperty('--pin-y', portY(index, count, node.type)); pin.setAttribute('aria-label', `${side} ${index + 1}`); pin.dataset.side = side; pin.dataset.pin = index;
+  const physicalSide = connectorSide(node, side, index);
+  const pin = document.createElement('button'); pin.className = `pin ${side} side-${physicalSide}${side === 'output' && node.outputs?.[index] ? ' on' : ''}${side === 'input' && node.inputs?.[index] ? ' on' : ''}`;
+  pin.style.setProperty('--pin-offset', connectorOffset(node, side, index)); pin.setAttribute('aria-label', `${side} ${index + 1}`); pin.dataset.side = side; pin.dataset.pin = index;
   if (state.pending?.node === node.id && state.pending?.pin === index) pin.classList.add('pending');
   pin.addEventListener('pointerdown', event => { event.stopPropagation(); if (side === 'output') startWireDrag(event, node, index); });
   return pin;
@@ -205,13 +240,15 @@ function nodeRenderKey(node) {
 }
 
 function createNodeElement(node, renderKey) {
-  const def = COMPONENTS[node.type]; const active = node.type === 'INPUT' || node.type === 'CLOCK' ? Boolean(node.value) : Boolean(node.outputs?.[0]);
-  const el = document.createElement('article'); el.className = `logic-node${GATE_TYPES.has(node.type) ? ' gate-node' : ''}${node.type === 'VIA' ? ' via-node' : ''}${state.selectedNode === node.id ? ' selected' : ''}${active ? ' active' : ''}`; el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; el.dataset.id = node.id; el.dataset.renderKey = renderKey;
+  const def = COMPONENTS[node.type]; const active = node.type === 'INPUT' || node.type === 'CLOCK' ? Boolean(node.value) : node.type === 'LED_MATRIX' ? node.outputs?.some(Boolean) : Boolean(node.outputs?.[0]);
+  const dimensions = nodeDimensions(node.type);
+  const el = document.createElement('article'); el.className = `logic-node${GATE_TYPES.has(node.type) ? ' gate-node' : ''}${node.type === 'VIA' ? ' via-node' : ''}${node.type === 'LED_MATRIX' ? ' matrix-node' : ''}${state.selectedNode === node.id ? ' selected' : ''}${active ? ' active' : ''}`; el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; el.style.width = `${dimensions.width}px`; el.style.height = `${dimensions.height}px`; el.dataset.id = node.id; el.dataset.renderKey = renderKey;
   let center = `<span class="node-value">${active ? 'HIGH · 1' : 'LOW · 0'}</span>`;
   if (GATE_TYPES.has(node.type)) center = gateSvg(node.type);
   if (node.type === 'INPUT') center = `<button class="input-toggle" aria-label="Toggle ${escapeHtml(node.label)}" title="Toggle input"></button>`;
   if (node.type === 'LED') center = `<span class="led" aria-label="${active ? 'On' : 'Off'}"></span>`;
   if (node.type === 'OUTPUT') center = `<span class="node-value">${node.inputs?.[0] ? 'HIGH · 1' : 'LOW · 0'}</span>`;
+  if (node.type === 'LED_MATRIX') center = `<div class="led-matrix" role="img" aria-label="4 by 4 LED matrix">${Array.from({ length: 16 }, (_, index) => `<span class="matrix-led${node.outputs?.[index] ? ' on' : ''}"></span>`).join('')}</div>`;
   el.innerHTML = node.type === 'VIA'
     ? `<div class="via-core" aria-label="${escapeHtml(node.label)} signal junction"></div>`
     : `<button class="node-help" aria-label="How ${escapeHtml(def.label)} works" title="How this component works">?</button><div class="gate-hint"${state.hintNode === node.id ? '' : ' hidden'}>${escapeHtml(def.hint)}</div><div class="node-head"><strong>${escapeHtml(node.label)}</strong><span class="node-symbol">${def.symbol}</span></div><div class="node-body">${center}</div>`;
@@ -226,8 +263,8 @@ function createNodeElement(node, renderKey) {
   if (node.type === 'VIA') {
     for (let i = 0; i < 4; i++) el.append(makeViaPort(node, i));
   } else {
-    for (let i = 0; i < def.inputs; i++) { el.append(makePin(node, 'input', i, def.inputs)); const label = document.createElement('span'); label.className = 'pin-label input'; label.style.setProperty('--pin-y', portY(i, def.inputs, node.type)); label.textContent = String.fromCharCode(65 + i); el.append(label); }
-    for (let i = 0; i < def.outputs; i++) { el.append(makePin(node, 'output', i, def.outputs)); const label = document.createElement('span'); label.className = 'pin-label output'; label.style.setProperty('--pin-y', portY(i, def.outputs, node.type)); label.textContent = 'Q'; el.append(label); }
+    for (let i = 0; i < def.inputs; i++) { const physicalSide = connectorSide(node, 'input', i); el.append(makePin(node, 'input', i, def.inputs)); const label = document.createElement('span'); label.className = `pin-label input side-${physicalSide}`; label.style.setProperty('--pin-offset', connectorOffset(node, 'input', i)); label.textContent = node.type === 'LED_MATRIX' ? (i < 4 ? `R${i + 1}` : `C${i - 3}`) : String.fromCharCode(65 + i); el.append(label); }
+    for (let i = 0; i < def.outputs; i++) { const physicalSide = connectorSide(node, 'output', i); el.append(makePin(node, 'output', i, def.outputs)); const label = document.createElement('span'); label.className = `pin-label output side-${physicalSide}`; label.style.setProperty('--pin-offset', connectorOffset(node, 'output', i)); label.textContent = 'Q'; el.append(label); }
   }
   return el;
 }
@@ -236,12 +273,13 @@ function renderNodes() {
   const liveIds = new Set(state.nodes.map(node => node.id));
   for (const child of [...nodesLayer.children]) if (!liveIds.has(child.dataset.id)) child.remove();
   const rendered = new Map([...nodesLayer.children].map(child => [child.dataset.id, child]));
+  const animatedVias = propagatingViaIds(state.nodes, state.wires, state.runningNodes);
   for (const node of state.nodes) {
     const renderKey = nodeRenderKey(node);
     const current = rendered.get(node.id);
     if (!current) nodesLayer.append(createNodeElement(node, renderKey));
     else if (current.dataset.renderKey !== renderKey) current.replaceWith(createNodeElement(node, renderKey));
-    nodesLayer.querySelector(`[data-id="${CSS.escape(node.id)}"]`)?.classList.toggle('processing', state.runningNodes.has(node.id));
+    nodesLayer.querySelector(`[data-id="${CSS.escape(node.id)}"]`)?.classList.toggle('processing', state.runningNodes.has(node.id) || animatedVias.has(node.id));
   }
 }
 
@@ -260,8 +298,9 @@ function startWireDrag(event, node, pin) {
   const source = nodePortPosition(node, 'output', pin); let targetPin = null;
   const move = current => {
     const rect = workspace.getBoundingClientRect(); const target = { x: (current.clientX - rect.left - state.panX) / state.zoom, y: (current.clientY - rect.top - state.panY) / state.zoom };
-    draftWire.setAttribute('d', curve(source, target));
     const candidate = document.elementFromPoint(current.clientX, current.clientY)?.closest('.pin.input, .pin.via-port');
+    const targetNodeId = candidate?.closest('.logic-node')?.dataset.id;
+    draftWire.setAttribute('d', wireRoute(source, target, [node.id, targetNodeId].filter(Boolean)).path);
     if (candidate !== targetPin) { targetPin?.classList.remove('drop-target'); targetPin = candidate; targetPin?.classList.add('drop-target'); }
   };
   const up = current => {
@@ -280,12 +319,13 @@ function cancelWire() { wireDragCleanup?.(); wireDragCleanup = null; state.pendi
 function renderInspector() {
   const node = state.nodes.find(n => n.id === state.selectedNode);
   if (!node) {
-    const emptyKey = state.selectedWire ? `wire:${state.selectedWire}` : 'empty';
+    const emptyKey = state.selectedWire ? `wire:${state.selectedWire}` : `empty:${state.wireStyle}`;
     if (inspector.dataset.renderKey !== emptyKey) {
       inspector.innerHTML = state.selectedWire
         ? `<div class="inspector-content"><p class="eyebrow">Inspector</p><div class="inspector-icon">⌁</div><h2>Connection</h2><p>Signal wire between two components.</p><button class="delete-selection">Delete connection</button></div>`
-        : `<div class="inspector-empty"><span class="selection-glyph">◇</span><strong>Nothing selected</strong><p>Select a component or connection to see its details.</p></div>`;
+        : `<div class="inspector-empty"><span class="selection-glyph">◇</span><strong>Workspace settings</strong><p>Select a component or connection to see its details.</p><fieldset class="wire-style-control"><legend>Wire style</legend><label><input type="radio" name="wire-style" value="orthogonal"${state.wireStyle === 'orthogonal' ? ' checked' : ''}><span>Orthogonal</span></label><label><input type="radio" name="wire-style" value="curved"${state.wireStyle === 'curved' ? ' checked' : ''}><span>Curved</span></label></fieldset></div>`;
       inspector.querySelector('.delete-selection')?.addEventListener('click', removeSelection);
+      for (const input of inspector.querySelectorAll('input[name="wire-style"]')) input.addEventListener('change', event => { if (!event.target.checked) return; state.wireStyle = event.target.value; inspector.dataset.renderKey = ''; renderWires(); renderInspector(); persistWorkspace(); });
     }
     inspector.dataset.renderKey = emptyKey; return;
   }
@@ -354,7 +394,24 @@ function removeSelection() {
 }
 
 function setZoom(next) { state.zoom = Math.min(1.6, Math.max(.55, next)); render(); }
-function resetView() { state.zoom = 1; state.panX = 0; state.panY = 0; render(); }
+function resetZoom() {
+  const centerX = (workspace.clientWidth / 2 - state.panX) / state.zoom;
+  const centerY = (workspace.clientHeight / 2 - state.panY) / state.zoom;
+  state.zoom = 1; state.panX = workspace.clientWidth / 2 - centerX; state.panY = workspace.clientHeight / 2 - centerY; render();
+}
+function fitCircuit() {
+  if (!state.nodes.length) { state.zoom = 1; state.panX = 0; state.panY = 0; render(); return; }
+  const bounds = state.nodes.reduce((box, node) => {
+    const dimensions = nodeDimensions(node.type);
+    return { left: Math.min(box.left, node.x), top: Math.min(box.top, node.y), right: Math.max(box.right, node.x + dimensions.width), bottom: Math.max(box.bottom, node.y + dimensions.height) };
+  }, { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
+  const padding = 72;
+  const width = Math.max(1, bounds.right - bounds.left); const height = Math.max(1, bounds.bottom - bounds.top);
+  state.zoom = Math.min(1.6, Math.max(.1, Math.min((workspace.clientWidth - padding * 2) / width, (workspace.clientHeight - padding * 2) / height)));
+  state.panX = workspace.clientWidth / 2 - (bounds.left + width / 2) * state.zoom;
+  state.panY = workspace.clientHeight / 2 - (bounds.top + height / 2) * state.zoom;
+  render();
+}
 function advanceSimulation() {
   if (!state.nodes.length) { state.runningNodes = new Set(); state.executionIndex = 0; state.executionPlan = []; render(); return; }
   if (!state.executionPlan.length || state.executionIndex >= state.executionPlan.length) prepareExecutionCycle(true);
@@ -378,7 +435,7 @@ function advanceSimulation() {
 function toggleSimulation() { state.isPlaying = !state.isPlaying; render(); }
 function restartSimulation() {
   state.clock = false; state.runningNodes = new Set(); state.executionIndex = 0; state.executionPlan = []; state.cycleValues = new Map(); state.energizedNodes = new Set();
-  for (const node of state.nodes) { const def = COMPONENTS[node.type]; node.inputs = Array(def.inputs).fill(false); node.outputs = Array(Math.max(1, def.outputs)).fill(false); if (node.type === 'CLOCK') node.value = false; }
+  for (const node of state.nodes) { const def = COMPONENTS[node.type]; node.inputs = Array(def.inputs).fill(false); node.outputs = Array(def.stateSize ?? Math.max(1, def.outputs)).fill(false); if (node.type === 'CLOCK') node.value = false; }
   state.isPlaying = true; prepareExecutionCycle(false); render();
 }
 function scheduleClock() { setTimeout(() => { if (state.isPlaying && !state.simulationError) advanceSimulation(); scheduleClock(); }, 1000 / state.clockHz); }
@@ -462,7 +519,7 @@ $('#search').addEventListener('input', event => buildLibrary(event.target.value)
 $('#undo').addEventListener('click', undo); $('#redo').addEventListener('click', redo); $('#save').addEventListener('click', saveCircuit);
 $('#open-file').addEventListener('change', event => { if (event.target.files[0]) openCircuit(event.target.files[0]); event.target.value = ''; });
 $('#clear').addEventListener('click', () => { if (!state.nodes.length || confirm('Clear this circuit?')) { checkpoint(); state.nodes = []; state.wires = []; state.selectedNode = null; state.selectedWire = null; state.hintNode = null; state.runningNodes = new Set(); state.executionIndex = 0; state.executionPlan = []; state.cycleValues = new Map(); state.energizedNodes = new Set(); render(); } });
-$('#zoom-in').addEventListener('click', () => setZoom(state.zoom + .1)); $('#zoom-out').addEventListener('click', () => setZoom(state.zoom - .1)); $('#fit').addEventListener('click', resetView);
+$('#zoom-in').addEventListener('click', () => setZoom(state.zoom + .1)); $('#zoom-out').addEventListener('click', () => setZoom(state.zoom - .1)); $('#zoom-label').addEventListener('click', resetZoom); $('#fit').addEventListener('click', fitCircuit);
 $('#clock-speed').addEventListener('input', event => updateClockSpeed(event));
 $('#clock-speed').addEventListener('change', event => updateClockSpeed(event, true));
 $('#toggle-simulation').addEventListener('click', toggleSimulation);

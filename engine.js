@@ -12,6 +12,7 @@ export const COMPONENTS = {
   BUFFER: { category: 'Routing', label: 'Buffer', symbol: '▷', detail: 'Pass signal', hint: 'Passes the input signal through without changing it.', inputs: 1, outputs: 1 },
   OUTPUT: { category: 'Outputs', label: 'Output', symbol: 'OUT', detail: 'Signal probe', hint: 'Displays the signal received at its input.', inputs: 1, outputs: 0 },
   LED:    { category: 'Outputs', label: 'LED',    symbol: '●', detail: 'Light indicator', hint: 'Lights when its input signal is HIGH.', inputs: 1, outputs: 0 },
+  LED_MATRIX: { category: 'Displays', label: '4×4 LED Matrix', symbol: '▦', detail: 'Row and column display', hint: 'The four left inputs select rows and the four bottom inputs select columns. An LED lights where a HIGH row and HIGH column meet.', inputs: 8, outputs: 0, stateSize: 16, width: 190, height: 190, inputSides: ['left', 'left', 'left', 'left', 'bottom', 'bottom', 'bottom', 'bottom'] },
 };
 
 export function evaluate(type, inputs, sourceValue = false) {
@@ -29,6 +30,7 @@ export function evaluate(type, inputs, sourceValue = false) {
     case 'BUFFER': return [Boolean(inputs[0])];
     case 'OUTPUT':
     case 'LED': return [Boolean(inputs[0])];
+    case 'LED_MATRIX': return Array.from({ length: 16 }, (_, index) => Boolean(inputs[Math.floor(index / 4)] && inputs[4 + (index % 4)]));
     default: return [false];
   }
 }
@@ -38,7 +40,8 @@ export function simulate(nodes, wires, iterations = 32) {
   for (const node of nodes) {
     const def = COMPONENTS[node.type];
     if (!Array.isArray(node.inputs) || node.inputs.length !== def.inputs) node.inputs = Array(def.inputs).fill(false);
-    if (!Array.isArray(node.outputs) || !node.outputs.length) node.outputs = evaluate(node.type, node.inputs, node.value);
+    const outputCount = def.stateSize ?? Math.max(1, def.outputs);
+    if (!Array.isArray(node.outputs) || node.outputs.length !== outputCount) node.outputs = evaluate(node.type, node.inputs, node.value);
   }
 
   const signature = outputs => nodes.map(node => outputs.get(node.id).map(Number).join('')).join('|');
@@ -101,6 +104,28 @@ export function executionBatches(nodes, wires) {
   const feedbackNodes = nodes.filter(node => !scheduled.has(node.id)).map(node => node.id);
   if (feedbackNodes.length) batches.push(feedbackNodes);
   return batches;
+}
+
+export function propagatingViaIds(nodes, wires, runningNodeIds) {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const running = runningNodeIds instanceof Set ? runningNodeIds : new Set(runningNodeIds);
+  const animated = new Set();
+  for (const wire of wires) {
+    const source = byId.get(wire.from.node);
+    if (!source || !running.has(source.id) || !source.outputs?.[wire.from.pin]) continue;
+    if (source.type === 'VIA') animated.add(source.id);
+    const target = byId.get(wire.to.node); if (target?.type === 'VIA') animated.add(target.id);
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const wire of wires) {
+      const source = byId.get(wire.from.node); const target = byId.get(wire.to.node);
+      if (source?.type === 'VIA' && animated.has(source.id) && target?.type === 'VIA' && !animated.has(target.id)) { animated.add(target.id); changed = true; }
+      if (target?.type === 'VIA' && animated.has(target.id) && source?.type === 'VIA' && !animated.has(source.id)) { animated.add(source.id); changed = true; }
+    }
+  }
+  return animated;
 }
 
 export function makeExample() {

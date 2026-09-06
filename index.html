@@ -45,9 +45,9 @@
       </div>
       <div class="canvas-actions">
         <button id="zoom-out" aria-label="Zoom out">−</button>
-        <span id="zoom-label">100%</span>
+        <button id="zoom-label" class="zoom-label" aria-label="Reset zoom to 100%" title="Reset zoom to 100%">100%</button>
         <button id="zoom-in" aria-label="Zoom in">＋</button>
-        <button id="fit" aria-label="Reset view">⌂</button>
+        <button id="fit" aria-label="Fit circuit to screen" title="Fit circuit to screen">⌂</button>
       </div>
       <div id="simulation-error" class="simulation-error" role="alert" hidden></div>
     </main>
@@ -55,8 +55,13 @@
     <aside id="inspector" class="inspector-panel">
       <div class="inspector-empty">
         <span class="selection-glyph">◇</span>
-        <strong>Nothing selected</strong>
-        <p>Select a component to see its details.</p>
+        <strong>Workspace settings</strong>
+        <p>Select a component or connection to see its details.</p>
+        <fieldset class="wire-style-control">
+          <legend>Wire style</legend>
+          <label><input type="radio" name="wire-style" value="orthogonal" checked /><span>Orthogonal</span></label>
+          <label><input type="radio" name="wire-style" value="curved" /><span>Curved</span></label>
+        </fieldset>
       </div>
     </aside>
 
