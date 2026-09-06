@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { COMPONENTS, evaluate, simulate, initializeNodeState, propagationSeeds, propagateBatch, makeExample } from './engine.js';
+import { COMPONENTS, evaluate, simulate, initializeNodeState, propagationSeeds, propagateBatch, wireIdsInNet, removeJunction, makeExample, makeCounterExample } from './engine.js';
 
 test('LED is the only single-signal output component', () => {
   assert.equal(COMPONENTS.OUTPUT, undefined);
@@ -101,4 +101,71 @@ test('4 by 4 LED matrix lights active row and column intersections', () => {
     false, true, false, true,
     false, false, false, false,
   ]);
+});
+
+test('D flip-flop captures D only on a rising clock edge', () => {
+  assert.deepEqual(evaluate('D_FLIP_FLOP', [true, false], false, [false, true], [false, false]), [false, true]);
+  assert.deepEqual(evaluate('D_FLIP_FLOP', [true, true], false, [false, true], [true, false]), [true, false]);
+  assert.deepEqual(evaluate('D_FLIP_FLOP', [false, true], false, [true, false], [true, true]), [true, false]);
+});
+
+test('4-bit counter advances on clock rising edges', () => {
+  const circuit = makeCounterExample(); const clock = circuit.nodes.find(node => node.id === 'clock');
+  const flipFlops = circuit.nodes.filter(node => node.type === 'D_FLIP_FLOP');
+  for (const flipFlop of flipFlops) {
+    const clockWires = circuit.wires.filter(wire => wire.to.node === flipFlop.id && wire.to.pin === 1);
+    assert.deepEqual(clockWires.map(wire => wire.from.node), ['clock']);
+  }
+  const bits = () => circuit.nodes.filter(node => node.type === 'D_FLIP_FLOP').map(node => Boolean(node.outputs[0]));
+  simulate(circuit.nodes, circuit.wires, 64);
+  const tick = () => { clock.value = false; simulate(circuit.nodes, circuit.wires, 64); clock.value = true; simulate(circuit.nodes, circuit.wires, 64); };
+  tick();
+  assert.deepEqual(bits(), [true, false, false, false]);
+  tick();
+  assert.deepEqual(bits(), [false, true, false, false]);
+  tick();
+  assert.deepEqual(bits(), [true, true, false, false]);
+  tick();
+  assert.deepEqual(bits(), [false, false, true, false]);
+});
+
+test('an explicit junction connection merges two wires into one electrical net', () => {
+  const nodes = [
+    { id: 'high', type: 'INPUT', value: true }, { id: 'low', type: 'INPUT', value: false },
+    { id: 'led-a', type: 'LED' }, { id: 'led-b', type: 'LED' },
+  ];
+  const wires = [
+    { id: 'a1', from: { node: 'high', pin: 0, side: 'output' }, to: { junction: 'j1' } },
+    { id: 'a2', from: { junction: 'j1' }, to: { node: 'led-a', pin: 0, side: 'input' } },
+    { id: 'b1', from: { node: 'low', pin: 0, side: 'output' }, to: { junction: 'j2' } },
+    { id: 'b2', from: { junction: 'j2' }, to: { node: 'led-b', pin: 0, side: 'input' } },
+  ];
+  simulate(nodes, wires);
+  assert.equal(nodes.find(node => node.id === 'led-b').outputs[0], false);
+  wires.push({ id: 'join', from: { junction: 'j1' }, to: { junction: 'j2' } });
+  simulate(nodes, wires);
+  assert.equal(nodes.find(node => node.id === 'led-b').outputs[0], true);
+});
+
+test('junction net membership includes every connected segment but excludes other wires', () => {
+  const wires = [
+    { id: 'source-j1', from: { node: 'source', pin: 0, side: 'output' }, to: { junction: 'j1' } },
+    { id: 'j1-j2', from: { junction: 'j1' }, to: { junction: 'j2' } },
+    { id: 'j2-led', from: { junction: 'j2' }, to: { node: 'led', pin: 0, side: 'input' } },
+    { id: 'other', from: { node: 'other-source', pin: 0, side: 'output' }, to: { node: 'other-led', pin: 0, side: 'input' } },
+  ];
+  assert.deepEqual([...wireIdsInNet(wires, { junction: 'j1' })].sort(), ['j1-j2', 'j2-led', 'source-j1']);
+});
+
+test('removing a two-connection junction collapses its segments into one wire', () => {
+  const nodes = [{ id: 'source', type: 'INPUT', value: true }, { id: 'led', type: 'LED' }];
+  const wires = [
+    { id: 'left', from: { node: 'source', pin: 0, side: 'output' }, to: { junction: 'j1' } },
+    { id: 'right', from: { junction: 'j1' }, to: { node: 'led', pin: 0, side: 'input' } },
+  ];
+  const collapsed = removeJunction(wires, [{ id: 'j1', x: 100, y: 50 }], 'j1', 'replacement');
+  assert.deepEqual(collapsed.junctions, []);
+  assert.deepEqual(collapsed.wires, [{ id: 'replacement', from: { node: 'source', pin: 0, side: 'output' }, to: { node: 'led', pin: 0, side: 'input' } }]);
+  simulate(nodes, collapsed.wires);
+  assert.equal(nodes.find(node => node.id === 'led').outputs[0], true);
 });

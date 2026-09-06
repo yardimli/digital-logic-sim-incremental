@@ -28,6 +28,19 @@ function compress(points) {
   });
 }
 
+export function orthogonalizePoints(points) {
+  const aligned = [];
+  for (const point of points) {
+    const previous = aligned[aligned.length - 1];
+    if (previous && previous.x !== point.x && previous.y !== point.y) {
+      const horizontalFirst = previous.side === 'left' || previous.side === 'right' || point.side === 'left' || point.side === 'right';
+      aligned.push(horizontalFirst ? { x: point.x, y: previous.y } : { x: previous.x, y: point.y });
+    }
+    aligned.push({ ...point });
+  }
+  return compress(aligned);
+}
+
 function segmentClear(a, b, obstacles) {
   return !obstacles.some(rect => {
     if (a.y === b.y) return a.y > rect.top && a.y < rect.bottom && Math.max(Math.min(a.x, b.x), rect.left) < Math.min(Math.max(a.x, b.x), rect.right);
@@ -38,16 +51,35 @@ function segmentClear(a, b, obstacles) {
 function parallelOverlap(a, b, segments) {
   const horizontal = a.y === b.y;
   return segments.reduce((total, segment) => {
-    const segmentHorizontal = segment.a.y === segment.b.y;
-    if (horizontal !== segmentHorizontal) return total;
-    if (horizontal && a.y !== segment.a.y) return total;
-    if (!horizontal && a.x !== segment.a.x) return total;
-    const firstStart = horizontal ? Math.min(a.x, b.x) : Math.min(a.y, b.y);
-    const firstEnd = horizontal ? Math.max(a.x, b.x) : Math.max(a.y, b.y);
-    const secondStart = horizontal ? Math.min(segment.a.x, segment.b.x) : Math.min(segment.a.y, segment.b.y);
-    const secondEnd = horizontal ? Math.max(segment.a.x, segment.b.x) : Math.max(segment.a.y, segment.b.y);
+    if (horizontal !== (segment.a.y === segment.b.y)) return total;
+    if (horizontal ? a.y !== segment.a.y : a.x !== segment.a.x) return total;
+    const firstStart = horizontal ? Math.min(a.x, b.x) : Math.min(a.y, b.y); const firstEnd = horizontal ? Math.max(a.x, b.x) : Math.max(a.y, b.y);
+    const secondStart = horizontal ? Math.min(segment.a.x, segment.b.x) : Math.min(segment.a.y, segment.b.y); const secondEnd = horizontal ? Math.max(segment.a.x, segment.b.x) : Math.max(segment.a.y, segment.b.y);
     return total + Math.max(0, Math.min(firstEnd, secondEnd) - Math.max(firstStart, secondStart));
   }, 0);
+}
+
+function fallbackRoute(start, leadStart, leadEnd, end, obstacles, clearance, occupiedSegments) {
+  const candidates = [
+    [leadStart, { x: leadEnd.x, y: leadStart.y }, leadEnd],
+    [leadStart, { x: leadStart.x, y: leadEnd.y }, leadEnd],
+  ];
+  const horizontalLanes = new Set([leadStart.y, leadEnd.y]); const verticalLanes = new Set([leadStart.x, leadEnd.x]);
+  for (const rect of obstacles) { horizontalLanes.add(rect.top); horizontalLanes.add(rect.bottom); verticalLanes.add(rect.left); verticalLanes.add(rect.right); }
+  if (obstacles.length) {
+    horizontalLanes.add(Math.min(...obstacles.map(rect => rect.top)) - clearance); horizontalLanes.add(Math.max(...obstacles.map(rect => rect.bottom)) + clearance);
+    verticalLanes.add(Math.min(...obstacles.map(rect => rect.left)) - clearance); verticalLanes.add(Math.max(...obstacles.map(rect => rect.right)) + clearance);
+  }
+  for (const y of horizontalLanes) candidates.push([leadStart, { x: leadStart.x, y }, { x: leadEnd.x, y }, leadEnd]);
+  for (const x of verticalLanes) candidates.push([leadStart, { x, y: leadStart.y }, { x, y: leadEnd.y }, leadEnd]);
+  let best = null; let bestCost = Infinity;
+  for (const candidate of candidates.map(compress)) {
+    if (candidate.some((point, index) => index && !segmentClear(candidate[index - 1], point, obstacles))) continue;
+    let cost = (candidate.length - 2) * 20;
+    for (let index = 1; index < candidate.length; index++) cost += Math.abs(candidate[index].x - candidate[index - 1].x) + Math.abs(candidate[index].y - candidate[index - 1].y) + parallelOverlap(candidate[index - 1], candidate[index], occupiedSegments) * 8;
+    if (cost < bestCost) { best = candidate; bestCost = cost; }
+  }
+  return orthogonalizePoints([start, ...(best || [leadStart, { x: leadEnd.x, y: leadStart.y }, leadEnd]), end]);
 }
 
 function heapPush(heap, item) {
@@ -62,7 +94,7 @@ function heapPop(heap) {
   heap[index] = tail; return root;
 }
 
-export function routeWire(start, end, rectangles, clearance = 14, leadLength = 18, occupiedSegments = []) {
+export function routeWire(start, end, rectangles, clearance = 20, leadLength = 20, occupiedSegments = []) {
   const startDirection = directionVector(start.side); const endDirection = directionVector(end.side || 'left');
   const leadStart = { x: start.x + startDirection[0] * leadLength, y: start.y + startDirection[1] * leadLength };
   const leadEnd = { x: end.x + endDirection[0] * leadLength, y: end.y + endDirection[1] * leadLength };
@@ -70,8 +102,8 @@ export function routeWire(start, end, rectangles, clearance = 14, leadLength = 1
   const xs = new Set([leadStart.x, leadEnd.x]); const ys = new Set([leadStart.y, leadEnd.y]);
   for (const rect of obstacles) { xs.add(rect.left); xs.add(rect.right); ys.add(rect.top); ys.add(rect.bottom); }
   for (const segment of occupiedSegments) {
-    if (segment.a.y === segment.b.y) { ys.add(segment.a.y - 9); ys.add(segment.a.y + 9); }
-    else { xs.add(segment.a.x - 9); xs.add(segment.a.x + 9); }
+    if (segment.a.y === segment.b.y) { ys.add(segment.a.y - 10); ys.add(segment.a.y + 10); }
+    else { xs.add(segment.a.x - 10); xs.add(segment.a.x + 10); }
   }
   if (obstacles.length) {
     xs.add(Math.min(...obstacles.map(rect => rect.left)) - clearance); xs.add(Math.max(...obstacles.map(rect => rect.right)) + clearance);
@@ -91,7 +123,7 @@ export function routeWire(start, end, rectangles, clearance = 14, leadLength = 1
   for (const y of yValues) { let previous = null; for (const x of xValues) { const current = pointIndex.get(`${x},${y}`); if (current != null) { connect(previous, current, 'h'); previous = current; } } }
   for (const x of xValues) { let previous = null; for (const y of yValues) { const current = pointIndex.get(`${x},${y}`); if (current != null) { connect(previous, current, 'v'); previous = current; } } }
   const startIndex = pointIndex.get(`${leadStart.x},${leadStart.y}`); const endIndex = pointIndex.get(`${leadEnd.x},${leadEnd.y}`);
-  if (startIndex == null || endIndex == null) return compress([start, leadStart, leadEnd, end]);
+  if (startIndex == null || endIndex == null) return fallbackRoute(start, leadStart, leadEnd, end, obstacles, clearance, occupiedSegments);
 
   const initialDirection = startDirection[0] ? 'h' : 'v'; const heap = []; const costs = new Map(); const previous = new Map();
   const initialKey = `${startIndex}:${initialDirection}`; costs.set(initialKey, 0); heapPush(heap, { index: startIndex, direction: initialDirection, cost: 0 });
@@ -103,21 +135,20 @@ export function routeWire(start, end, rectangles, clearance = 14, leadLength = 1
     for (const neighbor of points[current.index].neighbors) {
       const bendPenalty = neighbor.direction === current.direction ? 0 : 20;
       const overlap = parallelOverlap(points[current.index], points[neighbor.index], occupiedSegments);
-      const overlapPenalty = overlap ? 400 + overlap * 6 : 0;
-      const nextCost = current.cost + neighbor.distance + bendPenalty + overlapPenalty; const nextKey = `${neighbor.index}:${neighbor.direction}`;
+      const nextCost = current.cost + neighbor.distance + bendPenalty + (overlap ? 600 + overlap * 8 : 0); const nextKey = `${neighbor.index}:${neighbor.direction}`;
       if (nextCost >= (costs.get(nextKey) ?? Infinity)) continue;
       costs.set(nextKey, nextCost); previous.set(nextKey, key); heapPush(heap, { index: neighbor.index, direction: neighbor.direction, cost: nextCost });
     }
   }
-  if (!finalKey) return compress([start, leadStart, leadEnd, end]);
+  if (!finalKey) return fallbackRoute(start, leadStart, leadEnd, end, obstacles, clearance, occupiedSegments);
   const routed = [];
   for (let key = finalKey; key; key = previous.get(key)) routed.push(points[Number(key.split(':')[0])]);
   routed.reverse();
-  return compress([start, ...routed, end]);
+  return orthogonalizePoints([start, ...routed, end]);
 }
 
 export function orthogonalPath(points) {
-  return points.reduce((path, point, index) => `${path}${index ? ` L ${point.x} ${point.y}` : `M ${point.x} ${point.y}`}`, '');
+  return orthogonalizePoints(points).reduce((path, point, index) => `${path}${index ? ` L ${point.x} ${point.y}` : `M ${point.x} ${point.y}`}`, '');
 }
 
 export function moveOrthogonalSegment(points, segmentIndex, coordinate) {

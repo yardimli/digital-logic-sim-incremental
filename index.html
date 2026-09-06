@@ -20,6 +20,7 @@
         <button id="undo" class="icon-button" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
         <button id="redo" class="icon-button" title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
         <span class="divider"></span>
+        <label class="examples-control"><span>Examples</span><select id="examples" aria-label="Load example circuit"><option value="">Choose…</option><option value="half-adder">Half Adder</option><option value="4-bit-counter">4-bit Counter</option></select></label>
         <button id="save" class="tool-button">Save</button>
         <label class="tool-button file-button">Open<input id="open-file" type="file" accept="application/json,.json" /></label>
         <button id="clear" class="icon-button danger" title="Clear circuit" aria-label="Clear circuit">⌫</button>
@@ -32,11 +33,11 @@
         <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Find a component" /></label>
       </div>
       <div id="component-library" class="component-library"></div>
-      <div class="library-tip"><kbd>Drag</kbd> to place · Drag output to input</div>
+      <div class="library-tip">Hold Shift and drag from a wire to add a junction</div>
     </aside>
 
     <main id="workspace" class="workspace" tabindex="0" aria-label="Circuit workspace">
-      <svg id="wires" class="wires" aria-hidden="true"><g id="wire-layer"></g><path id="draft-wire" class="wire draft" d="" /></svg>
+      <svg id="wires" class="wires" role="group" aria-label="Circuit connections"><g id="wire-layer"></g><g id="junction-layer"></g><path id="draft-wire" class="wire draft" d="" /></svg>
       <div id="nodes" class="nodes"></div>
       <div id="empty-state" class="empty-state" hidden>
         <div class="empty-icon">＋</div>

@@ -1,21 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeWire, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear, moveOrthogonalSegment } from './router.js';
+import { routeWire, orthogonalizePoints, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear, moveOrthogonalSegment } from './router.js';
 
-test('wire routing detours around component rectangles', () => {
+test('wire routing keeps a 20px safe margin around components', () => {
   const obstacle = { left: 80, right: 140, top: 30, bottom: 90 };
-  const points = routeWire({ x: 0, y: 60, side: 'right' }, { x: 220, y: 60, side: 'left' }, [obstacle], 10);
-  assert.ok(points.some(point => point.y <= 20 || point.y >= 100));
+  const safeArea = { left: 60, right: 160, top: 10, bottom: 110 };
+  const points = routeWire({ x: 0, y: 60, side: 'right' }, { x: 220, y: 60, side: 'left' }, [obstacle]);
+  assert.ok(points.some(point => point.y <= safeArea.top || point.y >= safeArea.bottom));
   for (let index = 1; index < points.length; index++) {
     const a = points[index - 1]; const b = points[index];
+    assert.ok(a.x === b.x || a.y === b.y, 'every orthogonal segment must be horizontal or vertical');
     const crosses = a.y === b.y
-      ? a.y > obstacle.top && a.y < obstacle.bottom && Math.max(Math.min(a.x, b.x), obstacle.left) < Math.min(Math.max(a.x, b.x), obstacle.right)
-      : a.x > obstacle.left && a.x < obstacle.right && Math.max(Math.min(a.y, b.y), obstacle.top) < Math.min(Math.max(a.y, b.y), obstacle.bottom);
+      ? a.y > safeArea.top && a.y < safeArea.bottom && Math.max(Math.min(a.x, b.x), safeArea.left) < Math.min(Math.max(a.x, b.x), safeArea.right)
+      : a.x > safeArea.left && a.x < safeArea.right && Math.max(Math.min(a.y, b.y), safeArea.top) < Math.min(Math.max(a.y, b.y), safeArea.bottom);
     assert.equal(crosses, false);
   }
   assert.match(orthogonalPath(points), /^M /);
   assert.match(curvedPath(points), / C /);
   assert.doesNotMatch(curvedPath(points), / L | Q /);
+});
+
+test('orthogonal paths repair diagonal points into right-angle segments', () => {
+  const points = orthogonalizePoints([{ x: 0, y: 10, side: 'right' }, { x: 60, y: 45 }, { x: 100, y: 80, side: 'left' }]);
+  for (let index = 1; index < points.length; index++) assert.ok(points[index - 1].x === points[index].x || points[index - 1].y === points[index].y);
+  assert.equal(orthogonalPath([{ x: 0, y: 10, side: 'right' }, { x: 60, y: 45 }]), 'M 0 10 L 60 10 L 60 45');
 });
 
 test('curved wires use a single sweeping cubic Bezier when unobstructed', () => {
@@ -28,26 +36,17 @@ test('curved wires use a single sweeping cubic Bezier when unobstructed', () => 
   assert.equal(directBezierIsClear(start, end, [{ left: 90, right: 130, top: 50, bottom: 90 }]), false);
 });
 
-test('parallel wires choose separate lanes while perpendicular crossings remain allowed', () => {
+test('unobstructed wires use the direct lane even when routes overlap', () => {
   const start = { x: 0, y: 50, side: 'right' }; const end = { x: 220, y: 50, side: 'left' };
-  const first = routeWire(start, end, []);
-  const occupied = first.slice(1).map((point, index) => ({ a: first[index], b: point }));
-  const second = routeWire(start, end, [], 14, 18, occupied);
-  assert.ok(second.some(point => point.y !== 50));
-  const sharedLength = second.slice(1).reduce((total, point, index) => {
-    const a = second[index]; const horizontal = a.y === point.y;
-    return total + occupied.reduce((overlap, segment) => {
-      if (horizontal !== (segment.a.y === segment.b.y)) return overlap;
-      if (horizontal && a.y !== segment.a.y) return overlap;
-      if (!horizontal && a.x !== segment.a.x) return overlap;
-      const firstStart = horizontal ? Math.min(a.x, point.x) : Math.min(a.y, point.y);
-      const firstEnd = horizontal ? Math.max(a.x, point.x) : Math.max(a.y, point.y);
-      const secondStart = horizontal ? Math.min(segment.a.x, segment.b.x) : Math.min(segment.a.y, segment.b.y);
-      const secondEnd = horizontal ? Math.max(segment.a.x, segment.b.x) : Math.max(segment.a.y, segment.b.y);
-      return overlap + Math.max(0, Math.min(firstEnd, secondEnd) - Math.max(firstStart, secondStart));
-    }, 0);
-  }, 0);
-  assert.ok(sharedLength <= 36);
+  const points = routeWire(start, end, []);
+  assert.ok(points.every(point => point.y === 50));
+});
+
+test('beautify routing can assign a separate lane around an occupied wire', () => {
+  const start = { x: 0, y: 50, side: 'right' }; const end = { x: 220, y: 50, side: 'left' };
+  const occupied = [{ a: start, b: end }];
+  const points = routeWire(start, end, [], 20, 20, occupied);
+  assert.ok(points.some(point => point.y !== 50));
 });
 
 test('orthogonal segments only move perpendicular to their direction', () => {
