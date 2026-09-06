@@ -2,6 +2,7 @@ import { COMPONENTS, initializeNodeState, propagationSeeds, propagateBatch, make
 import { routeWire, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear, moveOrthogonalSegment } from './router.js';
 
 const $ = selector => document.querySelector(selector);
+const appShell = $('.app-shell');
 const workspace = $('#workspace');
 const nodesLayer = $('#nodes');
 const wireLayer = $('#wire-layer');
@@ -550,6 +551,11 @@ workspace.addEventListener('pointerdown', event => {
   const move = current => { state.panX = start.panX + current.clientX - start.x; state.panY = start.panY + current.clientY - start.y; applyViewportTransform(); };
   const up = () => { workspace.classList.remove('panning'); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); persistWorkspace(); };
   window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+});
+workspace.addEventListener('dblclick', event => {
+  if (innerWidth <= 650 || event.target.closest('.logic-node, .wire, .canvas-actions, button, input, select')) return;
+  event.preventDefault();
+  appShell.classList.toggle('panels-collapsed');
 });
 workspace.addEventListener('dragover', event => { if (!event.dataTransfer.types.includes('application/x-dls-component')) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; workspace.classList.add('drop-ready'); });
 workspace.addEventListener('dragleave', event => { if (!workspace.contains(event.relatedTarget)) workspace.classList.remove('drop-ready'); });

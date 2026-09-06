@@ -28,7 +28,10 @@ button { color: inherit; }
   display: grid;
   grid-template: 58px 1fr 48px / var(--sidebar) minmax(0, 1fr) var(--inspector);
   background: var(--bg);
+  transition: grid-template-columns .24s ease;
 }
+
+.app-shell.panels-collapsed { grid-template-columns: 0 minmax(0, 1fr) 0; }
 
 .topbar {
   grid-column: 1 / -1;
@@ -66,9 +69,11 @@ button { color: inherit; }
 .file-button { display: grid; place-items: center; }
 .file-button input { display: none; }
 
-.library-panel, .inspector-panel { min-height: 0; background: var(--panel); z-index: 10; }
-.library-panel { border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-.inspector-panel { border-left: 1px solid var(--line); overflow-y: auto; }
+.library-panel, .inspector-panel { min-height: 0; background: var(--panel); z-index: 10; transition: transform .24s ease, opacity .18s ease, visibility 0s; }
+.library-panel { width: var(--sidebar); min-width: var(--sidebar); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+.inspector-panel { width: var(--inspector); min-width: var(--inspector); border-left: 1px solid var(--line); overflow-y: auto; }
+.app-shell.panels-collapsed .library-panel { transform: translateX(-100%); opacity: 0; visibility: hidden; transition-delay: 0s, 0s, .24s; }
+.app-shell.panels-collapsed .inspector-panel { transform: translateX(100%); opacity: 0; visibility: hidden; transition-delay: 0s, 0s, .24s; }
 .library-head { padding: 18px 14px 12px; }
 .eyebrow { margin: 0 0 12px; color: #c9d0db; text-transform: uppercase; font-size: .72rem; font-weight: 760; letter-spacing: .11em; }
 .search { display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 10px; background: #0b0e14; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); }
@@ -234,6 +239,7 @@ kbd { padding: 2px 5px; border: 1px solid #3c4555; background: #202631; border-r
 @media (max-width: 650px) {
   :root { --sidebar: 0px; }
   .app-shell { grid-template: 52px 1fr 46px / 1fr; }
+  .app-shell.panels-collapsed { grid-template-columns: 1fr; }
   .brand { border: 0; padding: 0 10px; font-size: 0; }
   .brand-mark { width: 22px; }
   .topbar { grid-template-columns: 42px 1fr auto; }
