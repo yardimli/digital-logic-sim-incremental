@@ -112,7 +112,10 @@ kbd { padding: 2px 5px; border: 1px solid #3c4555; background: #202631; border-r
 .logic-node.selected { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(255,200,61,.2), 0 8px 22px rgba(0,0,0,.32); }
 .matrix-node { min-height: 190px; }
 .matrix-node .node-body { min-height: 158px; padding: 15px 28px 28px; }
-.led-matrix { display: grid; grid-template-columns: repeat(4, 22px); gap: 10px; padding: 12px; border: 1px solid #30394a; border-radius: 8px; background: #0e131b; box-shadow: inset 0 2px 9px rgba(0,0,0,.35); }
+.matrix-symbol { position: relative; width: 190px; height: 168px; }
+.matrix-leads { position: absolute; inset: 0; width: 190px; height: 168px; overflow: visible; }
+.matrix-leads path, .clock-wave, .clock-symbol .component-lead { fill: none; stroke: #9aa7b8; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
+.led-matrix { position: absolute; left: 24px; top: 0; display: grid; grid-template-columns: repeat(4, 22px); gap: 10px; padding: 12px; border: 1px solid #30394a; border-radius: 8px; background: #0e131b; box-shadow: inset 0 2px 9px rgba(0,0,0,.35); }
 .matrix-led { width: 22px; height: 22px; border: 2px solid #505b6c; border-radius: 50%; background: #252d39; box-shadow: inset 0 0 0 4px #151b24; }
 .matrix-led.on { border-color: #a6ffd0; background: var(--signal); box-shadow: 0 0 12px var(--signal-glow), inset 0 0 0 2px rgba(255,255,255,.22); }
 .node-head { height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; border-bottom: 1px solid #30394a; }
@@ -120,8 +123,16 @@ kbd { padding: 2px 5px; border: 1px solid #3c4555; background: #202631; border-r
 .logic-node.active .node-head strong { color: var(--signal); text-shadow: 0 0 8px var(--signal-glow); }
 .node-symbol { color: #8592a5; font: 700 .72rem ui-monospace, monospace; }
 .node-body { position: relative; min-height: 69px; display: grid; place-items: center; padding: 3px 10px; color: var(--muted); font-size: .7rem; }
-.gate-node { background: rgba(17,22,30,.72); }
-.gate-node .node-body { padding: 2px 8px; }
+.bare-node { border-color: transparent; border-radius: 0; background: transparent; box-shadow: none; }
+.bare-node:hover, .bare-node.selected { border-color: transparent; box-shadow: none; }
+.bare-node.selected .node-head strong { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+.bare-node .node-head { height: 20px; justify-content: center; padding: 0; border: 0; }
+.bare-node .node-symbol { display: none; }
+.bare-node:not(.gate-node) .node-body { position: absolute; top: 24px; left: 0; width: 100%; height: calc(100% - 24px); min-height: 0; padding: 0; }
+.compact-node { min-height: 88px; }
+.bare-node.compact-node:not(.gate-node) .node-body { height: 64px; }
+.gate-node { min-height: 88px; }
+.gate-node .node-body { position: absolute; top: 24px; left: 0; width: 120px; min-height: 64px; padding: 0; }
 .gate-symbol { width: 120px; height: 64px; overflow: visible; }
 .gate-body, .gate-bubble, .gate-lead { fill: #19212c; stroke: #9aa7b8; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
 .gate-lead { fill: none; }
@@ -130,7 +141,13 @@ kbd { padding: 2px 5px; border: 1px solid #3c4555; background: #202631; border-r
 .input-toggle::before { content: ""; display: block; width: 14px; height: 14px; border-radius: 50%; background: #667085; transition: .15s ease; }
 .logic-node.active .input-toggle { border-color: rgba(102,228,167,.7); background: rgba(102,228,167,.13); }
 .logic-node.active .input-toggle::before { transform: translateX(17px); background: var(--signal); box-shadow: 0 0 8px var(--signal-glow); }
+.source-symbol, .led-symbol { position: relative; width: 120px; height: 64px; }
+.source-symbol .component-lead { position: absolute; left: 100px; right: 0; top: 50%; height: 2px; transform: translateY(-50%); background: #9aa7b8; }
+.source-symbol .input-toggle { position: absolute; left: 62px; top: 50%; z-index: 1; transform: translateY(-50%); }
+.clock-symbol { width: 120px; height: 64px; overflow: visible; }
+.led-symbol .component-lead { position: absolute; left: 0; width: 20px; top: 50%; height: 2px; transform: translateY(-50%); background: #9aa7b8; }
 .led { width: 19px; height: 19px; border-radius: 50%; background: #29313e; border: 2px solid #5b6573; box-shadow: inset 0 0 0 3px #141922; }
+.led-symbol .led { position: absolute; left: 20px; top: 50%; z-index: 1; transform: translateY(-50%); }
 .logic-node.active .led { background: var(--signal); border-color: #a6ffd0; box-shadow: 0 0 15px var(--signal-glow); }
 .pin { position: absolute; width: 14px; height: 14px; border: 2px solid #78859a; background: #131821; border-radius: 50%; cursor: crosshair; z-index: 4; }
 .pin.side-left { left: -8px; top: calc(var(--pin-offset) * 1%); transform: translateY(-50%); }
@@ -139,6 +156,10 @@ kbd { padding: 2px 5px; border: 1px solid #3c4555; background: #202631; border-r
 .pin.side-bottom { bottom: -8px; left: calc(var(--pin-offset) * 1%); transform: translateX(-50%); }
 .pin:hover, .pin.pending { border-color: var(--accent); background: #131821; box-shadow: 0 0 0 4px var(--accent-soft); }
 .pin.drop-target { border-color: #fff; background: #131821; box-shadow: 0 0 0 6px var(--signal-glow); }
+.bare-node .pin { opacity: 0; }
+.bare-node .pin.side-left { left: -7px; }
+.bare-node .pin.side-right { right: -7px; }
+.workspace.connecting .bare-node .pin { opacity: 1; }
 .empty-state { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 7px; color: var(--muted); pointer-events: none; }
 .empty-state[hidden] { display: none; }
 .empty-state strong { color: #d7deea; }

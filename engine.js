@@ -9,9 +9,8 @@ export const COMPONENTS = {
   XOR:    { category: 'Logic gates', label: 'XOR',  symbol: '=1', detail: 'Inputs differ', hint: 'Outputs HIGH when exactly one input is HIGH.', inputs: 2, outputs: 1 },
   XNOR:   { category: 'Logic gates', label: 'XNOR', symbol: '≡',  detail: 'Inputs match', hint: 'Outputs HIGH when A and B have the same value.', inputs: 2, outputs: 1 },
   BUFFER: { category: 'Routing', label: 'Buffer', symbol: '▷', detail: 'Pass signal', hint: 'Passes the input signal through without changing it.', inputs: 1, outputs: 1 },
-  OUTPUT: { category: 'Outputs', label: 'Output', symbol: 'OUT', detail: 'Signal probe', hint: 'Displays the signal received at its input.', inputs: 1, outputs: 0 },
   LED:    { category: 'Outputs', label: 'LED',    symbol: '●', detail: 'Light indicator', hint: 'Lights when its input signal is HIGH.', inputs: 1, outputs: 0 },
-  LED_MATRIX: { category: 'Displays', label: '4×4 LED Matrix', symbol: '▦', detail: 'Row and column display', hint: 'The four left inputs select rows and the four bottom inputs select columns. An LED lights where a HIGH row and HIGH column meet.', inputs: 8, outputs: 0, stateSize: 16, width: 190, height: 190, inputSides: ['left', 'left', 'left', 'left', 'bottom', 'bottom', 'bottom', 'bottom'] },
+  LED_MATRIX: { category: 'Displays', label: '4×4 LED Matrix', symbol: '▦', detail: 'Row and column display', hint: 'The four left inputs select rows and the four bottom inputs select columns. An LED lights where a HIGH row and HIGH column meet.', inputs: 8, outputs: 0, stateSize: 16, width: 190, height: 192, inputSides: ['left', 'left', 'left', 'left', 'bottom', 'bottom', 'bottom', 'bottom'] },
 };
 
 export function evaluate(type, inputs, sourceValue = false) {
@@ -26,7 +25,6 @@ export function evaluate(type, inputs, sourceValue = false) {
     case 'NOR': return [!(inputs[0] || inputs[1])];
     case 'XNOR': return [Boolean(inputs[0]) === Boolean(inputs[1])];
     case 'BUFFER': return [Boolean(inputs[0])];
-    case 'OUTPUT':
     case 'LED': return [Boolean(inputs[0])];
     case 'LED_MATRIX': return Array.from({ length: 16 }, (_, index) => Boolean(inputs[Math.floor(index / 4)] && inputs[4 + (index % 4)]));
     default: return [false];

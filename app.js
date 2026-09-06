@@ -11,6 +11,9 @@ const STORAGE_KEY = 'digital-logic-sim.workspace.v1';
 const NODE_WIDTH = 142;
 const NODE_HEIGHT = 100;
 const GATE_TYPES = new Set(['AND', 'OR', 'NOT', 'NAND', 'NOR', 'XOR', 'XNOR']);
+const GATE_SHAPE_TYPES = new Set([...GATE_TYPES, 'BUFFER']);
+const COMPACT_TYPES = new Set([...GATE_SHAPE_TYPES, 'INPUT', 'CLOCK', 'LED']);
+const BARE_TYPES = new Set([...GATE_SHAPE_TYPES, 'INPUT', 'CLOCK', 'LED', 'LED_MATRIX']);
 const restoredWorkspace = readStoredWorkspace();
 const starter = makeExample();
 const initialTabs = restoredWorkspace?.tabs?.length ? restoredWorkspace.tabs : [{ id: uid('tab'), ...starter, panX: 0, panY: 0, zoom: 1 }];
@@ -107,13 +110,14 @@ function gateSvg(type) {
   const exclusive = type === 'XOR' || type === 'XNOR';
   const andFamily = type === 'AND' || type === 'NAND';
   const notGate = type === 'NOT';
-  const body = notGate
+  const bufferGate = type === 'BUFFER';
+  const body = notGate || bufferGate
     ? '<path class="gate-body" d="M25 8 L94 32 L25 56 Z" />'
     : andFamily
       ? '<path class="gate-body" d="M18 8 H57 C82 8 98 18 98 32 C98 46 82 56 57 56 H18 Z" />'
       : '<path class="gate-body" d="M18 8 C48 8 77 10 99 32 C77 54 48 56 18 56 C31 43 31 21 18 8 Z" />';
-  const leads = notGate
-    ? '<path class="gate-lead" d="M0 32 H25 M107 32 H120" />'
+  const leads = notGate || bufferGate
+    ? `<path class="gate-lead" d="M0 32 H25 M${notGate ? 107 : 94} 32 H120" />`
     : `<path class="gate-lead" d="M0 21 H${andFamily ? 18 : 25} M0 43 H${andFamily ? 18 : 25} M${inverted ? 107 : 99} 32 H120" />`;
   const bubble = (inverted || notGate) ? '<circle class="gate-bubble" cx="104" cy="32" r="3" />' : '';
   const extra = exclusive ? '<path class="gate-lead" d="M10 8 C24 22 24 42 10 56" />' : '';
@@ -131,7 +135,7 @@ function buildLibrary(filter = '') {
     for (const [type, def] of items) {
       const entry = document.createElement('div'); entry.className = 'component-entry';
       const button = document.createElement('button'); button.className = 'component-item'; button.draggable = true;
-      button.innerHTML = `<span class="component-icon${GATE_TYPES.has(type) ? ' gate-preview' : ''}">${GATE_TYPES.has(type) ? gateSvg(type) : def.symbol}</span><span class="component-copy"><strong>${def.label}</strong><small>${def.detail}</small></span>`;
+      button.innerHTML = `<span class="component-icon${GATE_SHAPE_TYPES.has(type) ? ' gate-preview' : ''}">${GATE_SHAPE_TYPES.has(type) ? gateSvg(type) : def.symbol}</span><span class="component-copy"><strong>${def.label}</strong><small>${def.detail}</small></span>`;
       button.addEventListener('dragstart', event => { event.dataTransfer.setData('application/x-dls-component', type); event.dataTransfer.setData('text/plain', type); event.dataTransfer.effectAllowed = 'copy'; button.classList.add('dragging'); });
       button.addEventListener('dragend', () => { button.classList.remove('dragging'); workspace.classList.remove('drop-ready'); });
       const help = document.createElement('button'); help.className = 'library-help'; help.textContent = '?'; help.setAttribute('aria-label', `How ${def.label} works`); help.setAttribute('aria-expanded', 'false');
@@ -148,6 +152,7 @@ function buildLibrary(filter = '') {
 
 function nodeDimensions(type) {
   const def = COMPONENTS[type];
+  if (COMPACT_TYPES.has(type)) return { width: 120, height: 88 };
   return { width: def.width || NODE_WIDTH, height: def.height || NODE_HEIGHT };
 }
 
@@ -171,6 +176,14 @@ function connectorOffset(node, kind, pin) {
   const physicalSide = connectorSide(node, kind, pin);
   const peers = Array.from({ length: count }, (_, index) => index).filter(index => connectorSide(node, kind, index) === physicalSide);
   const position = peers.indexOf(pin);
+  if (COMPACT_TYPES.has(node.type) && (physicalSide === 'left' || physicalSide === 'right')) {
+    if (kind === 'input' && peers.length === 2) return [45 / 88 * 100, 67 / 88 * 100][position];
+    return 56 / 88 * 100;
+  }
+  if (node.type === 'LED_MATRIX') {
+    if (physicalSide === 'left') return [48, 80, 112, 144][position] / 192 * 100;
+    if (physicalSide === 'bottom') return [48, 80, 112, 144][position] / 190 * 100;
+  }
   if (physicalSide === 'left' || physicalSide === 'right') return peers.length === 1 ? 65 : 44 + position * (44 / Math.max(1, peers.length - 1));
   return peers.length === 1 ? 50 : 22 + position * (56 / Math.max(1, peers.length - 1));
 }
@@ -295,13 +308,13 @@ function nodeRenderKey(node) {
 function createNodeElement(node, renderKey) {
   const def = COMPONENTS[node.type]; const active = node.type === 'INPUT' || node.type === 'CLOCK' ? Boolean(node.value) : node.type === 'LED_MATRIX' ? node.outputs?.some(Boolean) : Boolean(node.outputs?.[0]);
   const dimensions = nodeDimensions(node.type);
-  const el = document.createElement('article'); el.className = `logic-node${GATE_TYPES.has(node.type) ? ' gate-node' : ''}${node.type === 'LED_MATRIX' ? ' matrix-node' : ''}${state.selectedNode === node.id ? ' selected' : ''}${active ? ' active' : ''}`; el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; el.style.width = `${dimensions.width}px`; el.style.height = `${dimensions.height}px`; el.dataset.id = node.id; el.dataset.renderKey = renderKey;
+  const el = document.createElement('article'); el.className = `logic-node${BARE_TYPES.has(node.type) ? ' bare-node' : ''}${COMPACT_TYPES.has(node.type) ? ' compact-node' : ''}${GATE_SHAPE_TYPES.has(node.type) ? ' gate-node' : ''}${node.type === 'LED_MATRIX' ? ' matrix-node' : ''}${state.selectedNode === node.id ? ' selected' : ''}${active ? ' active' : ''}`; el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; el.style.width = `${dimensions.width}px`; el.style.height = `${dimensions.height}px`; el.dataset.id = node.id; el.dataset.type = node.type; el.dataset.renderKey = renderKey;
   let center = `<span class="node-value">${active ? 'HIGH · 1' : 'LOW · 0'}</span>`;
-  if (GATE_TYPES.has(node.type)) center = gateSvg(node.type);
-  if (node.type === 'INPUT') center = `<button class="input-toggle" aria-label="Toggle ${escapeHtml(node.label)}" title="Toggle input"></button>`;
-  if (node.type === 'LED') center = `<span class="led" aria-label="${active ? 'On' : 'Off'}"></span>`;
-  if (node.type === 'OUTPUT') center = `<span class="node-value">${node.inputs?.[0] ? 'HIGH · 1' : 'LOW · 0'}</span>`;
-  if (node.type === 'LED_MATRIX') center = `<div class="led-matrix" role="img" aria-label="4 by 4 LED matrix">${Array.from({ length: 16 }, (_, index) => `<span class="matrix-led${node.outputs?.[index] ? ' on' : ''}"></span>`).join('')}</div>`;
+  if (GATE_SHAPE_TYPES.has(node.type)) center = gateSvg(node.type);
+  if (node.type === 'INPUT') center = `<div class="source-symbol"><button class="input-toggle" aria-label="Toggle ${escapeHtml(node.label)}" title="Toggle input"></button><span class="component-lead"></span></div>`;
+  if (node.type === 'CLOCK') center = '<svg class="clock-symbol" viewBox="0 0 120 64" aria-hidden="true"><path class="clock-wave" d="M20 42 H34 V22 H48 V42 H62 V22 H76 V42 H100 V32"/><path class="component-lead" d="M100 32 H120"/></svg>';
+  if (node.type === 'LED') center = `<div class="led-symbol"><span class="component-lead"></span><span class="led" aria-label="${active ? 'On' : 'Off'}"></span></div>`;
+  if (node.type === 'LED_MATRIX') center = `<div class="matrix-symbol" role="img" aria-label="4 by 4 LED matrix"><svg class="matrix-leads" viewBox="0 0 190 168" aria-hidden="true"><path d="M0 24 H24 M0 56 H24 M0 88 H24 M0 120 H24 M48 144 V168 M80 144 V168 M112 144 V168 M144 144 V168"/></svg><div class="led-matrix">${Array.from({ length: 16 }, (_, index) => `<span class="matrix-led${node.outputs?.[index] ? ' on' : ''}"></span>`).join('')}</div></div>`;
   el.innerHTML = `<div class="node-head"><strong>${escapeHtml(node.label)}</strong><span class="node-symbol">${def.symbol}</span></div><div class="node-body">${center}</div>`;
   el.addEventListener('pointerdown', event => {
     if (event.target.closest('button, input, select, .pin')) return;
@@ -514,7 +527,7 @@ function registerWebMcpTools() {
     description: 'Set one or more visible input switches by their labels and immediately simulate the circuit.',
     inputSchema: { type: 'object', properties: { values: { type: 'object', additionalProperties: { type: 'boolean' } } }, required: ['values'], additionalProperties: false },
     annotations: { readOnlyHint: false, untrustedContentHint: false },
-    execute(input) { const updated = setNamedInputs(input?.values); return { updated, outputs: state.nodes.filter(node => node.type === 'OUTPUT' || node.type === 'LED').map(node => ({ label: node.label, signal: Boolean(node.outputs?.[0]) })) }; },
+    execute(input) { const updated = setNamedInputs(input?.values); return { updated, outputs: state.nodes.filter(node => node.type === 'LED').map(node => ({ label: node.label, signal: Boolean(node.outputs?.[0]) })) }; },
   });
 }
 

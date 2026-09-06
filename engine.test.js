@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, simulate, initializeNodeState, propagationSeeds, propagateBatch, makeExample } from './engine.js';
+import { COMPONENTS, evaluate, simulate, initializeNodeState, propagationSeeds, propagateBatch, makeExample } from './engine.js';
+
+test('LED is the only single-signal output component', () => {
+  assert.equal(COMPONENTS.OUTPUT, undefined);
+  assert.equal(COMPONENTS.LED.inputs, 1);
+  assert.equal(COMPONENTS.LED.outputs, 0);
+});
 
 test('logic gates evaluate their truth tables', () => {
   assert.deepEqual(evaluate('AND', [true, true]), [true]);
