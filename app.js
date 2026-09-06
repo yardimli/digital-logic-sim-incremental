@@ -1,5 +1,5 @@
-import { COMPONENTS, simulate, executionBatches, propagatingViaIds, makeExample } from './engine.js';
-import { routeWire, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear } from './router.js';
+import { COMPONENTS, initializeNodeState, propagationSeeds, propagateBatch, makeExample } from './engine.js';
+import { routeWire, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear, moveOrthogonalSegment } from './router.js';
 
 const $ = selector => document.querySelector(selector);
 const workspace = $('#workspace');
@@ -10,33 +10,40 @@ const inspector = $('#inspector');
 const STORAGE_KEY = 'digital-logic-sim.workspace.v1';
 const NODE_WIDTH = 142;
 const NODE_HEIGHT = 100;
-const VIA_SIZE = 34;
 const GATE_TYPES = new Set(['AND', 'OR', 'NOT', 'NAND', 'NOR', 'XOR', 'XNOR']);
 const restoredWorkspace = readStoredWorkspace();
 const starter = makeExample();
 const initialTabs = restoredWorkspace?.tabs?.length ? restoredWorkspace.tabs : [{ id: uid('tab'), ...starter, panX: 0, panY: 0, zoom: 1 }];
+for (const tab of initialTabs) initializeNodeState(tab.nodes);
 const initialTab = initialTabs.find(tab => tab.id === restoredWorkspace?.activeTabId) || initialTabs[0];
-const state = { name: initialTab.name, nodes: initialTab.nodes, wires: initialTab.wires, tabs: initialTabs, activeTabId: initialTab.id, selectedNode: null, selectedWire: null, pending: null, hintNode: null, runningNodes: new Set(), executionIndex: 0, executionPlan: [], cycleValues: new Map(), energizedNodes: new Set(), clock: false, clockHz: restoredWorkspace?.clockHz || 5, wireStyle: restoredWorkspace?.wireStyle === 'curved' ? 'curved' : 'orthogonal', isPlaying: true, simulationError: null, zoom: initialTab.zoom || 1, panX: initialTab.panX || 0, panY: initialTab.panY || 0, history: [], future: [] };
+const state = { name: initialTab.name, nodes: initialTab.nodes, wires: initialTab.wires, tabs: initialTabs, activeTabId: initialTab.id, selectedNode: null, selectedWire: null, pending: null, propagationQueue: [], evaluatedNodes: new Set(), clock: false, clockHz: restoredWorkspace?.clockHz || 5, wireStyle: restoredWorkspace?.wireStyle === 'curved' ? 'curved' : 'orthogonal', isPlaying: true, simulationError: null, zoom: initialTab.zoom || 1, panX: initialTab.panX || 0, panY: initialTab.panY || 0, history: [], future: [] };
 let toastTimer;
 const objectTokens = new WeakMap();
 let nextObjectToken = 1;
 let lastPersistedWorkspace = '';
 let wireDragCleanup = null;
+let rewiringWireId = null;
 let wireRouteLayout = '';
 const wireRouteCache = new Map();
 
 function uid(prefix) { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`; }
+function sanitizeCircuitData(nodes, wires) {
+  const cleanNodes = nodes.filter(node => node && COMPONENTS[node.type]).map(node => ({ ...node, x: Number(node.x) || 0, y: Number(node.y) || 0, value: node.type === 'INPUT' || node.type === 'CLOCK' ? Boolean(node.value) : false }));
+  const nodeIds = new Set(cleanNodes.map(node => node.id));
+  const cleanWires = wires.filter(wire => wire?.from && wire?.to && nodeIds.has(wire.from.node) && nodeIds.has(wire.to.node));
+  return { nodes: cleanNodes, wires: cleanWires };
+}
 function readStoredWorkspace() {
   try {
     const value = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (!value || !Array.isArray(value.tabs)) return null;
-    const tabs = value.tabs.filter(tab => tab && Array.isArray(tab.nodes) && Array.isArray(tab.wires)).map((tab, index) => ({ id: String(tab.id || uid('tab')), name: String(tab.name || `Circuit ${index + 1}`), nodes: tab.nodes.filter(node => COMPONENTS[node.type]).map(node => ({ ...node, x: Number(node.x) || 0, y: Number(node.y) || 0, value: node.type === 'INPUT' ? Boolean(node.value) : false })), wires: tab.wires, panX: Number(tab.panX) || 0, panY: Number(tab.panY) || 0, zoom: Number(tab.zoom) || 1 }));
+    const tabs = value.tabs.filter(tab => tab && Array.isArray(tab.nodes) && Array.isArray(tab.wires)).map((tab, index) => ({ id: String(tab.id || uid('tab')), name: String(tab.name || `Circuit ${index + 1}`), ...sanitizeCircuitData(tab.nodes, tab.wires), panX: Number(tab.panX) || 0, panY: Number(tab.panY) || 0, zoom: Number(tab.zoom) || 1 }));
     return tabs.length ? { tabs, activeTabId: value.activeTabId, clockHz: Math.min(100, Math.max(1, Number(value.clockHz) || 5)), wireStyle: value.wireStyle === 'curved' ? 'curved' : 'orthogonal' } : null;
   } catch { return null; }
 }
 function activeTab() { return state.tabs.find(tab => tab.id === state.activeTabId); }
 function syncActiveTab() { const tab = activeTab(); if (tab) Object.assign(tab, { name: state.name, nodes: state.nodes, wires: state.wires, panX: state.panX, panY: state.panY, zoom: state.zoom }); }
-function serializableTab(tab) { return { id: tab.id, name: tab.name, panX: tab.panX || 0, panY: tab.panY || 0, zoom: tab.zoom || 1, nodes: tab.nodes.map(node => ({ id: node.id, type: node.type, label: node.label, x: node.x, y: node.y, value: node.type === 'INPUT' ? Boolean(node.value) : false })), wires: tab.wires }; }
+function serializableTab(tab) { return { id: tab.id, name: tab.name, panX: tab.panX || 0, panY: tab.panY || 0, zoom: tab.zoom || 1, nodes: tab.nodes.map(node => ({ id: node.id, type: node.type, label: node.label, x: node.x, y: node.y, value: node.type === 'INPUT' || node.type === 'CLOCK' ? Boolean(node.value) : false, inputs: [...(node.inputs || [])], outputs: [...(node.outputs || [])] })), wires: tab.wires }; }
 function persistWorkspace() {
   try {
     syncActiveTab();
@@ -56,12 +63,13 @@ function switchTab(id) {
   if (id === state.activeTabId) return;
   syncActiveTab();
   const tab = state.tabs.find(item => item.id === id); if (!tab) return;
-  cancelWire(); state.activeTabId = id; state.name = tab.name; state.nodes = tab.nodes; state.wires = tab.wires; state.panX = tab.panX || 0; state.panY = tab.panY || 0; state.zoom = tab.zoom || 1; state.selectedNode = null; state.selectedWire = null; state.hintNode = null; state.runningNodes = new Set(); state.executionIndex = 0; state.executionPlan = []; state.cycleValues = new Map(); state.energizedNodes = new Set(); state.history = []; state.future = []; simulateAndRender();
+  cancelWire(); state.activeTabId = id; state.name = tab.name; state.nodes = tab.nodes; state.wires = tab.wires; state.panX = tab.panX || 0; state.panY = tab.panY || 0; state.zoom = tab.zoom || 1; state.selectedNode = null; state.selectedWire = null; state.propagationQueue = []; state.evaluatedNodes = new Set(); state.history = []; state.future = []; simulateAndRender();
 }
 function addCircuitTab(circuit = null) {
   syncActiveTab();
   const number = state.tabs.length + 1;
-  const tab = { id: uid('tab'), name: circuit?.name || `Circuit ${number}`, nodes: circuit?.nodes || [], wires: circuit?.wires || [], panX: 0, panY: 0, zoom: 1 };
+  const cleanCircuit = sanitizeCircuitData(circuit?.nodes || [], circuit?.wires || []);
+  const tab = { id: uid('tab'), name: circuit?.name || `Circuit ${number}`, ...cleanCircuit, panX: 0, panY: 0, zoom: 1 };
   state.tabs.push(tab); state.activeTabId = '';
   switchTab(tab.id);
 }
@@ -106,8 +114,8 @@ function gateSvg(type) {
       : '<path class="gate-body" d="M18 8 C48 8 77 10 99 32 C77 54 48 56 18 56 C31 43 31 21 18 8 Z" />';
   const leads = notGate
     ? '<path class="gate-lead" d="M0 32 H25 M107 32 H120" />'
-    : `<path class="gate-lead" d="M0 21 H${andFamily ? 18 : 25} M0 43 H${andFamily ? 18 : 25} M${inverted ? 110 : 99} 32 H120" />`;
-  const bubble = (inverted || notGate) ? '<circle class="gate-bubble" cx="104" cy="32" r="6" />' : '';
+    : `<path class="gate-lead" d="M0 21 H${andFamily ? 18 : 25} M0 43 H${andFamily ? 18 : 25} M${inverted ? 107 : 99} 32 H120" />`;
+  const bubble = (inverted || notGate) ? '<circle class="gate-bubble" cx="104" cy="32" r="3" />' : '';
   const extra = exclusive ? '<path class="gate-lead" d="M10 8 C24 22 24 42 10 56" />' : '';
   return `<svg class="gate-symbol" viewBox="0 0 120 64" aria-hidden="true">${leads}${extra}${body}${bubble}</svg>`;
 }
@@ -121,18 +129,26 @@ function buildLibrary(filter = '') {
   for (const [category, items] of Object.entries(groups)) {
     const title = document.createElement('div'); title.className = 'category-title'; title.textContent = category; root.append(title);
     for (const [type, def] of items) {
+      const entry = document.createElement('div'); entry.className = 'component-entry';
       const button = document.createElement('button'); button.className = 'component-item'; button.draggable = true;
-      button.innerHTML = `<span class="component-icon${GATE_TYPES.has(type) ? ' gate-preview' : ''}">${GATE_TYPES.has(type) ? gateSvg(type) : def.symbol}</span><span class="component-copy"><strong>${def.label}</strong><small>${def.detail}</small></span><span class="component-add" aria-hidden="true">⋮⋮</span>`;
+      button.innerHTML = `<span class="component-icon${GATE_TYPES.has(type) ? ' gate-preview' : ''}">${GATE_TYPES.has(type) ? gateSvg(type) : def.symbol}</span><span class="component-copy"><strong>${def.label}</strong><small>${def.detail}</small></span>`;
       button.addEventListener('dragstart', event => { event.dataTransfer.setData('application/x-dls-component', type); event.dataTransfer.setData('text/plain', type); event.dataTransfer.effectAllowed = 'copy'; button.classList.add('dragging'); });
       button.addEventListener('dragend', () => { button.classList.remove('dragging'); workspace.classList.remove('drop-ready'); });
-      root.append(button);
+      const help = document.createElement('button'); help.className = 'library-help'; help.textContent = '?'; help.setAttribute('aria-label', `How ${def.label} works`); help.setAttribute('aria-expanded', 'false');
+      const hint = document.createElement('div'); hint.className = 'library-hint'; hint.textContent = def.hint; hint.hidden = true;
+      help.addEventListener('click', () => {
+        const show = hint.hidden;
+        for (const openHint of root.querySelectorAll('.library-hint:not([hidden])')) { openHint.hidden = true; openHint.previousElementSibling?.setAttribute('aria-expanded', 'false'); }
+        hint.hidden = !show; help.setAttribute('aria-expanded', String(show));
+      });
+      entry.append(button, help, hint); root.append(entry);
     }
   }
 }
 
 function nodeDimensions(type) {
   const def = COMPONENTS[type];
-  return type === 'VIA' ? { width: VIA_SIZE, height: VIA_SIZE } : { width: def.width || NODE_WIDTH, height: def.height || NODE_HEIGHT };
+  return { width: def.width || NODE_WIDTH, height: def.height || NODE_HEIGHT };
 }
 
 function addNode(type, position = null) {
@@ -159,17 +175,7 @@ function connectorOffset(node, kind, pin) {
   return peers.length === 1 ? 50 : 22 + position * (56 / Math.max(1, peers.length - 1));
 }
 function nodePortPosition(node, kind, pin) {
-  const def = COMPONENTS[node.type];
   const dimensions = nodeDimensions(node.type);
-  if (node.type === 'VIA') {
-    const positions = [
-      { x: node.x + dimensions.width / 2, y: node.y, side: 'top' },
-      { x: node.x + dimensions.width, y: node.y + dimensions.height / 2, side: 'right' },
-      { x: node.x + dimensions.width / 2, y: node.y + dimensions.height, side: 'bottom' },
-      { x: node.x, y: node.y + dimensions.height / 2, side: 'left' },
-    ];
-    return positions[pin] || positions[0];
-  }
   const side = connectorSide(node, kind, pin);
   const offset = connectorOffset(node, kind, pin) / 100;
   if (side === 'top') return { x: node.x + dimensions.width * offset, y: node.y, side };
@@ -183,75 +189,120 @@ function wireRoute(a, b, excludedNodeIds = [], occupiedSegments = []) {
   const points = routeWire(a, b, obstacles, state.wireStyle === 'curved' ? 30 : 14, 18, occupiedSegments);
   return { points, path: state.wireStyle === 'curved' ? curvedPath(points) : orthogonalPath(points) };
 }
+function routeForWire(wire, source, target, occupiedSegments = []) {
+  const start = nodePortPosition(source, 'output', wire.from.pin);
+  const end = nodePortPosition(target, 'input', wire.to.pin);
+  const manual = wire.manualRoutes?.[state.wireStyle];
+  if (state.wireStyle === 'curved' && manual?.bend) {
+    const points = [start, manual.bend, end]; return { points, path: curvedPath(points) };
+  }
+  if (state.wireStyle === 'orthogonal' && Array.isArray(manual?.points) && manual.points.length >= 2) {
+    const points = manual.points.map(point => ({ ...point })); points[0] = start; points[points.length - 1] = end;
+    return { points, path: orthogonalPath(points) };
+  }
+  return wireRoute(start, end, [source.id, target.id], occupiedSegments);
+}
+function workspacePoint(event) {
+  const rect = workspace.getBoundingClientRect();
+  return { x: (event.clientX - rect.left - state.panX) / state.zoom, y: (event.clientY - rect.top - state.panY) / state.zoom };
+}
+function nearestSegmentIndex(points, point) {
+  let nearest = 0; let nearestDistance = Infinity;
+  for (let index = 0; index < points.length - 1; index++) {
+    const first = points[index]; const second = points[index + 1];
+    const horizontal = first.y === second.y;
+    const along = horizontal ? Math.max(Math.min(point.x, Math.max(first.x, second.x)), Math.min(first.x, second.x)) : Math.max(Math.min(point.y, Math.max(first.y, second.y)), Math.min(first.y, second.y));
+    const dx = point.x - (horizontal ? along : first.x); const dy = point.y - (horizontal ? first.y : along);
+    const distance = dx * dx + dy * dy;
+    if (distance < nearestDistance) { nearestDistance = distance; nearest = index; }
+  }
+  return nearest;
+}
+function startWireShapeDrag(event, wire, route) {
+  if (event.button !== 0) return;
+  event.preventDefault(); event.stopPropagation(); state.selectedWire = wire.id; state.selectedNode = null; renderInspector(); renderWires();
+  const origin = workspacePoint(event); const segmentIndex = state.wireStyle === 'orthogonal' ? nearestSegmentIndex(route.points, origin) : -1;
+  const originalPoints = route.points.map(point => ({ ...point })); let dragging = false;
+  const move = current => {
+    const point = workspacePoint(current);
+    if (!dragging && Math.hypot(current.clientX - event.clientX, current.clientY - event.clientY) < 3) return;
+    if (!dragging) { checkpoint(); dragging = true; wire.manualRoutes ||= {}; }
+    if (state.wireStyle === 'curved') wire.manualRoutes.curved = { bend: { x: Math.round(point.x / 6) * 6, y: Math.round(point.y / 6) * 6 } };
+    else {
+      const horizontal = originalPoints[segmentIndex].y === originalPoints[segmentIndex + 1].y;
+      const coordinate = Math.round((horizontal ? point.y : point.x) / 6) * 6;
+      wire.manualRoutes.orthogonal = { points: moveOrthogonalSegment(originalPoints, segmentIndex, coordinate) };
+    }
+    renderWires();
+  };
+  const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); if (dragging) persistWorkspace(); };
+  window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+}
 function objectToken(value) { if (!objectTokens.has(value)) objectTokens.set(value, nextObjectToken++); return objectTokens.get(value); }
 
 function renderWires() {
-  const routeLayout = `${state.wireStyle}|${state.nodes.map(node => `${node.id}:${node.type}:${node.x}:${node.y}`).join('|')}|${state.wires.map(wire => `${wire.id}:${wire.from.node}:${wire.from.pin}:${wire.to.node}:${wire.to.pin}`).join('|')}`;
+  const routeLayout = `${state.wireStyle}|${state.nodes.map(node => `${node.id}:${node.type}:${node.x}:${node.y}`).join('|')}|${state.wires.map(wire => `${wire.id}:${wire.from.node}:${wire.from.pin}:${wire.to.node}:${wire.to.pin}:${JSON.stringify(wire.manualRoutes || {})}`).join('|')}`;
   if (routeLayout !== wireRouteLayout) { wireRouteLayout = routeLayout; wireRouteCache.clear(); }
-  const liveIds = new Set(state.wires.map(wire => wire.id));
+  const visibleWires = state.wires.filter(wire => wire.id !== rewiringWireId);
+  const liveIds = new Set(visibleWires.map(wire => wire.id));
   for (const child of [...wireLayer.children]) if (!liveIds.has(child.dataset.id)) child.remove();
   const rendered = new Map([...wireLayer.children].map(child => [child.dataset.id, child]));
   const occupiedSegments = [];
-  const animatedVias = propagatingViaIds(state.nodes, state.wires, state.runningNodes);
-  for (const wire of state.wires) {
+  for (const wire of visibleWires) {
     const source = state.nodes.find(n => n.id === wire.from.node); const target = state.nodes.find(n => n.id === wire.to.node);
     if (!source || !target) continue;
     const routeKey = `${wire.id}:${wire.from.node}:${wire.from.pin}:${wire.to.node}:${wire.to.pin}`;
     let route = wireRouteCache.get(routeKey);
-    if (!route) { route = wireRoute(nodePortPosition(source, 'output', wire.from.pin), nodePortPosition(target, 'input', wire.to.pin), [source.id, target.id], state.wireStyle === 'orthogonal' ? occupiedSegments : []); wireRouteCache.set(routeKey, route); }
+    if (!route) { route = routeForWire(wire, source, target, state.wireStyle === 'orthogonal' ? occupiedSegments : []); wireRouteCache.set(routeKey, route); }
     if (state.wireStyle === 'orthogonal') for (let index = 1; index < route.points.length; index++) occupiedSegments.push({ a: route.points[index - 1], b: route.points[index] });
     const path = route.path;
     const active = Boolean(source.outputs?.[wire.from.pin]);
-    const processing = (state.runningNodes.has(source.id) && active) || animatedVias.has(source.id) || animatedVias.has(target.id);
-    const renderKey = `${path}|${active}|${processing}|${state.selectedWire === wire.id}`;
+    const renderKey = `${path}|${active}|${state.selectedWire === wire.id}`;
     let group = rendered.get(wire.id);
     if (!group) {
       group = document.createElementNS('http://www.w3.org/2000/svg', 'g'); group.dataset.id = wire.id;
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path'); hit.setAttribute('class', 'wire-hit');
-      hit.addEventListener('pointerdown', event => { event.stopPropagation(); state.selectedWire = wire.id; state.selectedNode = null; render(); });
+      hit.addEventListener('pointerdown', event => startWireShapeDrag(event, wire, group._route));
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'path'); group.append(hit, line); wireLayer.append(group);
     }
     if (group.dataset.renderKey !== renderKey) {
-      const [hit, line] = group.children; hit.setAttribute('d', path); line.setAttribute('d', path); line.setAttribute('class', `wire${active ? ' on' : ''}${processing ? ' processing' : ''}${state.selectedWire === wire.id ? ' selected' : ''}`); group.dataset.renderKey = renderKey;
+      const [hit, line] = group.children; hit.setAttribute('d', path); line.setAttribute('d', path); line.setAttribute('class', `wire${active ? ' on' : ''}${state.selectedWire === wire.id ? ' selected' : ''}`); group.dataset.renderKey = renderKey;
     }
+    group._route = route;
   }
 }
 
-function makePin(node, side, index, count) {
+function makePin(node, side, index) {
   const physicalSide = connectorSide(node, side, index);
-  const pin = document.createElement('button'); pin.className = `pin ${side} side-${physicalSide}${side === 'output' && node.outputs?.[index] ? ' on' : ''}${side === 'input' && node.inputs?.[index] ? ' on' : ''}`;
+  const pin = document.createElement('button'); pin.className = `pin ${side} side-${physicalSide}`;
   pin.style.setProperty('--pin-offset', connectorOffset(node, side, index)); pin.setAttribute('aria-label', `${side} ${index + 1}`); pin.dataset.side = side; pin.dataset.pin = index;
   if (state.pending?.node === node.id && state.pending?.pin === index) pin.classList.add('pending');
-  pin.addEventListener('pointerdown', event => { event.stopPropagation(); if (side === 'output') startWireDrag(event, node, index); });
-  return pin;
-}
-
-function makeViaPort(node, index) {
-  const active = Boolean(node.outputs?.[index]);
-  const pin = document.createElement('button'); pin.className = `pin via-port${active ? ' on' : ''}`;
-  pin.setAttribute('aria-label', `Via connector ${index + 1}`); pin.dataset.side = 'via'; pin.dataset.pin = index;
-  if (state.pending?.node === node.id && state.pending?.pin === index) pin.classList.add('pending');
-  pin.addEventListener('pointerdown', event => { event.stopPropagation(); startWireDrag(event, node, index); });
+  pin.addEventListener('pointerdown', event => {
+    event.stopPropagation();
+    if (side === 'output') { startWireDrag(event, node, index); return; }
+    const connected = state.wires.filter(wire => wire.to.node === node.id && wire.to.pin === index);
+    if (connected.length !== 1) return;
+    const wire = connected[0]; const source = state.nodes.find(item => item.id === wire.from.node);
+    if (source) startWireDrag(event, source, wire.from.pin, wire);
+  });
   return pin;
 }
 
 function nodeRenderKey(node) {
-  return [objectToken(node), node.type, node.label, node.x, node.y, node.value, state.selectedNode === node.id, state.hintNode === node.id, node.inputs?.map(Number).join(''), node.outputs?.map(Number).join(''), state.pending?.node === node.id ? state.pending.pin : ''].join('|');
+  return [objectToken(node), node.type, node.label, node.x, node.y, node.value, state.selectedNode === node.id, node.inputs?.map(Number).join(''), node.outputs?.map(Number).join(''), state.pending?.node === node.id ? state.pending.pin : ''].join('|');
 }
 
 function createNodeElement(node, renderKey) {
   const def = COMPONENTS[node.type]; const active = node.type === 'INPUT' || node.type === 'CLOCK' ? Boolean(node.value) : node.type === 'LED_MATRIX' ? node.outputs?.some(Boolean) : Boolean(node.outputs?.[0]);
   const dimensions = nodeDimensions(node.type);
-  const el = document.createElement('article'); el.className = `logic-node${GATE_TYPES.has(node.type) ? ' gate-node' : ''}${node.type === 'VIA' ? ' via-node' : ''}${node.type === 'LED_MATRIX' ? ' matrix-node' : ''}${state.selectedNode === node.id ? ' selected' : ''}${active ? ' active' : ''}`; el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; el.style.width = `${dimensions.width}px`; el.style.height = `${dimensions.height}px`; el.dataset.id = node.id; el.dataset.renderKey = renderKey;
+  const el = document.createElement('article'); el.className = `logic-node${GATE_TYPES.has(node.type) ? ' gate-node' : ''}${node.type === 'LED_MATRIX' ? ' matrix-node' : ''}${state.selectedNode === node.id ? ' selected' : ''}${active ? ' active' : ''}`; el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; el.style.width = `${dimensions.width}px`; el.style.height = `${dimensions.height}px`; el.dataset.id = node.id; el.dataset.renderKey = renderKey;
   let center = `<span class="node-value">${active ? 'HIGH · 1' : 'LOW · 0'}</span>`;
   if (GATE_TYPES.has(node.type)) center = gateSvg(node.type);
   if (node.type === 'INPUT') center = `<button class="input-toggle" aria-label="Toggle ${escapeHtml(node.label)}" title="Toggle input"></button>`;
   if (node.type === 'LED') center = `<span class="led" aria-label="${active ? 'On' : 'Off'}"></span>`;
   if (node.type === 'OUTPUT') center = `<span class="node-value">${node.inputs?.[0] ? 'HIGH · 1' : 'LOW · 0'}</span>`;
   if (node.type === 'LED_MATRIX') center = `<div class="led-matrix" role="img" aria-label="4 by 4 LED matrix">${Array.from({ length: 16 }, (_, index) => `<span class="matrix-led${node.outputs?.[index] ? ' on' : ''}"></span>`).join('')}</div>`;
-  el.innerHTML = node.type === 'VIA'
-    ? `<div class="via-core" aria-label="${escapeHtml(node.label)} signal junction"></div>`
-    : `<button class="node-help" aria-label="How ${escapeHtml(def.label)} works" title="How this component works">?</button><div class="gate-hint"${state.hintNode === node.id ? '' : ' hidden'}>${escapeHtml(def.hint)}</div><div class="node-head"><strong>${escapeHtml(node.label)}</strong><span class="node-symbol">${def.symbol}</span></div><div class="node-body">${center}</div>`;
+  el.innerHTML = `<div class="node-head"><strong>${escapeHtml(node.label)}</strong><span class="node-symbol">${def.symbol}</span></div><div class="node-body">${center}</div>`;
   el.addEventListener('pointerdown', event => {
     if (event.target.closest('button, input, select, .pin')) return;
     startNodeDrag(event, node);
@@ -259,13 +310,8 @@ function createNodeElement(node, renderKey) {
   const inputToggle = el.querySelector('.input-toggle');
   inputToggle?.addEventListener('pointerdown', event => event.stopPropagation());
   inputToggle?.addEventListener('click', event => { event.stopPropagation(); checkpoint(); node.value = !node.value; simulateAndRender(); });
-  el.querySelector('.node-help')?.addEventListener('click', event => { event.stopPropagation(); state.hintNode = state.hintNode === node.id ? null : node.id; renderNodes(); });
-  if (node.type === 'VIA') {
-    for (let i = 0; i < 4; i++) el.append(makeViaPort(node, i));
-  } else {
-    for (let i = 0; i < def.inputs; i++) { const physicalSide = connectorSide(node, 'input', i); el.append(makePin(node, 'input', i, def.inputs)); const label = document.createElement('span'); label.className = `pin-label input side-${physicalSide}`; label.style.setProperty('--pin-offset', connectorOffset(node, 'input', i)); label.textContent = node.type === 'LED_MATRIX' ? (i < 4 ? `R${i + 1}` : `C${i - 3}`) : String.fromCharCode(65 + i); el.append(label); }
-    for (let i = 0; i < def.outputs; i++) { const physicalSide = connectorSide(node, 'output', i); el.append(makePin(node, 'output', i, def.outputs)); const label = document.createElement('span'); label.className = `pin-label output side-${physicalSide}`; label.style.setProperty('--pin-offset', connectorOffset(node, 'output', i)); label.textContent = 'Q'; el.append(label); }
-  }
+  for (let i = 0; i < def.inputs; i++) el.append(makePin(node, 'input', i));
+  for (let i = 0; i < def.outputs; i++) el.append(makePin(node, 'output', i));
   return el;
 }
 
@@ -273,13 +319,11 @@ function renderNodes() {
   const liveIds = new Set(state.nodes.map(node => node.id));
   for (const child of [...nodesLayer.children]) if (!liveIds.has(child.dataset.id)) child.remove();
   const rendered = new Map([...nodesLayer.children].map(child => [child.dataset.id, child]));
-  const animatedVias = propagatingViaIds(state.nodes, state.wires, state.runningNodes);
   for (const node of state.nodes) {
     const renderKey = nodeRenderKey(node);
     const current = rendered.get(node.id);
     if (!current) nodesLayer.append(createNodeElement(node, renderKey));
     else if (current.dataset.renderKey !== renderKey) current.replaceWith(createNodeElement(node, renderKey));
-    nodesLayer.querySelector(`[data-id="${CSS.escape(node.id)}"]`)?.classList.toggle('processing', state.runningNodes.has(node.id) || animatedVias.has(node.id));
   }
 }
 
@@ -287,18 +331,19 @@ function escapeHtml(value) { const span = document.createElement('span'); span.t
 function startNodeDrag(event, node) {
   if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); checkpoint(); state.selectedNode = node.id; state.selectedWire = null; render();
   const start = { x: event.clientX, y: event.clientY, nx: node.x, ny: node.y };
-  const move = e => { node.x = Math.round((start.nx + (e.clientX - start.x) / state.zoom) / 6) * 6; node.y = Math.round((start.ny + (e.clientY - start.y) / state.zoom) / 6) * 6; renderNodes(); renderWires(); };
+  let routesCleared = false;
+  const move = e => { if (!routesCleared) { for (const wire of state.wires) if (wire.from.node === node.id || wire.to.node === node.id) delete wire.manualRoutes; routesCleared = true; } node.x = Math.round((start.nx + (e.clientX - start.x) / state.zoom) / 6) * 6; node.y = Math.round((start.ny + (e.clientY - start.y) / state.zoom) / 6) * 6; renderNodes(); renderWires(); };
   const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); renderInspector(); persistWorkspace(); };
   window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
 }
 
-function startWireDrag(event, node, pin) {
+function startWireDrag(event, node, pin, rewiringWire = null) {
   if (event.button !== 0) return;
-  event.preventDefault(); cancelWire(); state.pending = { node: node.id, pin }; workspace.classList.add('connecting'); renderNodes();
+  event.preventDefault(); cancelWire(); rewiringWireId = rewiringWire?.id || null; state.pending = { node: node.id, pin }; state.selectedWire = null; workspace.classList.add('connecting'); renderNodes(); renderWires(); renderInspector();
   const source = nodePortPosition(node, 'output', pin); let targetPin = null;
   const move = current => {
     const rect = workspace.getBoundingClientRect(); const target = { x: (current.clientX - rect.left - state.panX) / state.zoom, y: (current.clientY - rect.top - state.panY) / state.zoom };
-    const candidate = document.elementFromPoint(current.clientX, current.clientY)?.closest('.pin.input, .pin.via-port');
+    const candidate = document.elementFromPoint(current.clientX, current.clientY)?.closest('.pin.input');
     const targetNodeId = candidate?.closest('.logic-node')?.dataset.id;
     draftWire.setAttribute('d', wireRoute(source, target, [node.id, targetNodeId].filter(Boolean)).path);
     if (candidate !== targetPin) { targetPin?.classList.remove('drop-target'); targetPin = candidate; targetPin?.classList.add('drop-target'); }
@@ -306,15 +351,23 @@ function startWireDrag(event, node, pin) {
   const up = current => {
     move(current); const destination = targetPin; const targetNode = destination?.closest('.logic-node'); const targetNodeId = targetNode?.dataset.id; const targetPinIndex = Number(destination?.dataset.pin);
     wireDragCleanup?.(); wireDragCleanup = null;
-    if (!destination || !targetNodeId || targetNodeId === node.id || !Number.isInteger(targetPinIndex)) { cancelWire(); return; }
+    if (!destination || !targetNodeId || !Number.isInteger(targetPinIndex)) {
+      if (rewiringWire) { checkpoint(); state.wires = state.wires.filter(wire => wire.id !== rewiringWire.id); cancelWire(); simulateAndRender(); }
+      else cancelWire();
+      return;
+    }
+    if (targetNodeId === node.id) { cancelWire(); return; }
     const duplicate = state.wires.some(wire => wire.from.node === node.id && wire.from.pin === pin && wire.to.node === targetNodeId && wire.to.pin === targetPinIndex);
     if (duplicate) { cancelWire(); return; }
-    checkpoint(); state.wires.push({ id: uid('wire'), from: { node: node.id, pin }, to: { node: targetNodeId, pin: targetPinIndex } }); cancelWire(); simulateAndRender();
+    checkpoint();
+    if (rewiringWire) { rewiringWire.to = { node: targetNodeId, pin: targetPinIndex }; delete rewiringWire.manualRoutes; }
+    else state.wires.push({ id: uid('wire'), from: { node: node.id, pin }, to: { node: targetNodeId, pin: targetPinIndex } });
+    cancelWire(); simulateAndRender();
   };
   wireDragCleanup = () => { targetPin?.classList.remove('drop-target'); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancelWire); };
   window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', cancelWire);
 }
-function cancelWire() { wireDragCleanup?.(); wireDragCleanup = null; state.pending = null; draftWire.setAttribute('d', ''); workspace.classList.remove('connecting'); renderNodes(); }
+function cancelWire() { wireDragCleanup?.(); wireDragCleanup = null; rewiringWireId = null; state.pending = null; draftWire.setAttribute('d', ''); workspace.classList.remove('connecting'); renderNodes(); renderWires(); }
 
 function renderInspector() {
   const node = state.nodes.find(n => n.id === state.selectedNode);
@@ -332,7 +385,7 @@ function renderInspector() {
   const def = COMPONENTS[node.type];
   const structuralKey = `${objectToken(node)}|${node.type}|${node.label}`;
   if (inspector.dataset.renderKey !== structuralKey) {
-    const connectionDescription = node.type === 'VIA' ? 'Four bidirectional connectors sharing one signal.' : `${def.inputs} input${def.inputs === 1 ? '' : 's'}, ${def.outputs} output${def.outputs === 1 ? '' : 's'}.`;
+    const connectionDescription = `${def.inputs} input${def.inputs === 1 ? '' : 's'}, ${def.outputs} output${def.outputs === 1 ? '' : 's'}.`;
     inspector.innerHTML = `<div class="inspector-content"><p class="eyebrow">Inspector</p><div class="inspector-icon">${def.symbol}</div><h2>${def.label}</h2><p>${def.detail}. ${connectionDescription}</p><label class="field"><span>Label</span><input id="node-label" value="${escapeHtml(node.label)}" /></label><div class="signal-readout"><span>Output signal</span><b></b></div><button class="delete-node">Remove component</button></div>`;
     inspector.querySelector('#node-label').addEventListener('change', event => { checkpoint(); node.label = event.target.value.trim() || def.label; simulateAndRender(); });
     inspector.querySelector('.delete-node').addEventListener('click', removeSelection);
@@ -341,29 +394,21 @@ function renderInspector() {
   const readout = inspector.querySelector('.signal-readout b'); readout.classList.toggle('on', Boolean(node.outputs?.[0])); readout.textContent = node.outputs?.[0] ? 'HIGH · 1' : 'LOW · 0';
 }
 
-function prepareExecutionCycle(toggleClock = false) {
-  state.runningNodes = new Set();
-  state.executionIndex = 0;
-  state.energizedNodes = new Set();
-  if (toggleClock) {
-    state.clock = !state.clock;
-    for (const node of state.nodes.filter(item => item.type === 'CLOCK')) node.value = state.clock;
-  }
+function preparePropagation() {
   try {
-    const evaluated = structuredClone(state.nodes);
-    simulate(evaluated, state.wires);
-    state.executionPlan = executionBatches(state.nodes, state.wires);
-    state.cycleValues = new Map(evaluated.map(node => [node.id, { inputs: [...(node.inputs || [])], outputs: [...(node.outputs || [])] }]));
+    initializeNodeState(state.nodes);
+    state.evaluatedNodes = new Set();
+    const seeds = propagationSeeds(state.nodes, state.wires);
+    state.propagationQueue = seeds.length ? [seeds] : [];
     state.simulationError = null;
   } catch (error) {
-    state.executionPlan = [];
-    state.cycleValues = new Map();
+    state.propagationQueue = [];
     state.simulationError = error instanceof Error ? error.message : 'The circuit could not be simulated.';
   }
 }
 
 function simulateAndRender() {
-  prepareExecutionCycle(false);
+  preparePropagation();
   render();
 }
 function applyViewportTransform() {
@@ -390,7 +435,7 @@ function removeSelection() {
   if (!state.selectedNode && !state.selectedWire) return; checkpoint();
   if (state.selectedNode) { state.nodes = state.nodes.filter(n => n.id !== state.selectedNode); state.wires = state.wires.filter(w => w.from.node !== state.selectedNode && w.to.node !== state.selectedNode); }
   if (state.selectedWire) state.wires = state.wires.filter(w => w.id !== state.selectedWire);
-  state.selectedNode = null; state.selectedWire = null; state.hintNode = null; simulateAndRender();
+  state.selectedNode = null; state.selectedWire = null; simulateAndRender();
 }
 
 function setZoom(next) { state.zoom = Math.min(1.6, Math.max(.55, next)); render(); }
@@ -413,30 +458,27 @@ function fitCircuit() {
   render();
 }
 function advanceSimulation() {
-  if (!state.nodes.length) { state.runningNodes = new Set(); state.executionIndex = 0; state.executionPlan = []; render(); return; }
-  if (!state.executionPlan.length || state.executionIndex >= state.executionPlan.length) prepareExecutionCycle(true);
-  if (state.simulationError || !state.executionPlan.length) { state.runningNodes = new Set(); render(); return; }
-  const batch = state.executionPlan[state.executionIndex++];
-  for (const nodeId of batch) {
-    const node = state.nodes.find(item => item.id === nodeId);
-    const next = state.cycleValues.get(nodeId);
-    if (node && next) { node.inputs = [...next.inputs]; node.outputs = [...next.outputs]; }
+  if (!state.nodes.length || state.simulationError) return;
+  if (!state.propagationQueue.length) {
+    const clocks = state.nodes.filter(node => node.type === 'CLOCK');
+    if (!clocks.length) return;
+    state.clock = !state.clock; for (const node of clocks) node.value = state.clock;
+    state.propagationQueue.push(clocks.map(node => node.id));
   }
-  const runningNodes = new Set();
-  for (const nodeId of batch) {
-    const node = state.nodes.find(item => item.id === nodeId);
-    const next = state.cycleValues.get(nodeId);
-    const reachedByHighSignal = node && state.wires.some(wire => wire.to.node === nodeId && Boolean(state.nodes.find(item => item.id === wire.from.node)?.outputs?.[wire.from.pin]));
-    if (node && next && (next.outputs.some(Boolean) || reachedByHighSignal)) { state.energizedNodes.add(nodeId); runningNodes.add(nodeId); }
+  const batch = state.propagationQueue.shift();
+  try {
+    const result = propagateBatch(state.nodes, state.wires, batch, state.evaluatedNodes);
+    if (result.nextNodeIds.length) state.propagationQueue.push(result.nextNodeIds);
+    render();
+  } catch (error) {
+    state.propagationQueue = []; state.simulationError = error instanceof Error ? error.message : 'The circuit could not be simulated.'; render();
   }
-  state.runningNodes = runningNodes;
-  render();
 }
 function toggleSimulation() { state.isPlaying = !state.isPlaying; render(); }
 function restartSimulation() {
-  state.clock = false; state.runningNodes = new Set(); state.executionIndex = 0; state.executionPlan = []; state.cycleValues = new Map(); state.energizedNodes = new Set();
+  state.clock = false; state.propagationQueue = []; state.evaluatedNodes = new Set();
   for (const node of state.nodes) { const def = COMPONENTS[node.type]; node.inputs = Array(def.inputs).fill(false); node.outputs = Array(def.stateSize ?? Math.max(1, def.outputs)).fill(false); if (node.type === 'CLOCK') node.value = false; }
-  state.isPlaying = true; prepareExecutionCycle(false); render();
+  state.isPlaying = true; preparePropagation(); render();
 }
 function scheduleClock() { setTimeout(() => { if (state.isPlaying && !state.simulationError) advanceSimulation(); scheduleClock(); }, 1000 / state.clockHz); }
 function updateClockSpeed(event, clamp = false) { const value = Number(event.target.value); if (!Number.isFinite(value) || (!clamp && value < 1)) return; state.clockHz = Math.min(100, Math.max(1, value)); if (clamp) event.target.value = state.clockHz; persistWorkspace(); }
@@ -518,7 +560,7 @@ document.addEventListener('keydown', event => {
 $('#search').addEventListener('input', event => buildLibrary(event.target.value));
 $('#undo').addEventListener('click', undo); $('#redo').addEventListener('click', redo); $('#save').addEventListener('click', saveCircuit);
 $('#open-file').addEventListener('change', event => { if (event.target.files[0]) openCircuit(event.target.files[0]); event.target.value = ''; });
-$('#clear').addEventListener('click', () => { if (!state.nodes.length || confirm('Clear this circuit?')) { checkpoint(); state.nodes = []; state.wires = []; state.selectedNode = null; state.selectedWire = null; state.hintNode = null; state.runningNodes = new Set(); state.executionIndex = 0; state.executionPlan = []; state.cycleValues = new Map(); state.energizedNodes = new Set(); render(); } });
+$('#clear').addEventListener('click', () => { if (!state.nodes.length || confirm('Clear this circuit?')) { checkpoint(); state.nodes = []; state.wires = []; state.selectedNode = null; state.selectedWire = null; state.propagationQueue = []; state.evaluatedNodes = new Set(); render(); } });
 $('#zoom-in').addEventListener('click', () => setZoom(state.zoom + .1)); $('#zoom-out').addEventListener('click', () => setZoom(state.zoom - .1)); $('#zoom-label').addEventListener('click', resetZoom); $('#fit').addEventListener('click', fitCircuit);
 $('#clock-speed').addEventListener('input', event => updateClockSpeed(event));
 $('#clock-speed').addEventListener('change', event => updateClockSpeed(event, true));

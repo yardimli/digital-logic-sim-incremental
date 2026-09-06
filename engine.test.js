@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, simulate, executionBatches, propagatingViaIds, makeExample } from './engine.js';
+import { evaluate, simulate, initializeNodeState, propagationSeeds, propagateBatch, makeExample } from './engine.js';
 
 test('logic gates evaluate their truth tables', () => {
   assert.deepEqual(evaluate('AND', [true, true]), [true]);
@@ -10,7 +10,6 @@ test('logic gates evaluate their truth tables', () => {
   assert.deepEqual(evaluate('NOR', [false, false]), [true]);
   assert.deepEqual(evaluate('NOR', [false, true]), [false]);
   assert.deepEqual(evaluate('NOT', [false]), [true]);
-  assert.deepEqual(evaluate('VIA', [false, true, false, false]), [true, true, true, true]);
 });
 
 test('half adder propagates sum and carry', () => {
@@ -39,42 +38,36 @@ test('one input accepts signals from multiple outputs', () => {
   assert.equal(nodes.find(node => node.id === 'buffer').outputs[0], true);
 });
 
-test('via combines its four connectors and fans the signal out', () => {
-  const nodes = [
-    { id: 'source', type: 'INPUT', value: true },
-    { id: 'via', type: 'VIA', value: false },
-    { id: 'first', type: 'LED', value: false },
-    { id: 'second', type: 'LED', value: false },
-  ];
-  const wires = [
-    { id: 'in', from: { node: 'source', pin: 0 }, to: { node: 'via', pin: 0 } },
-    { id: 'out-1', from: { node: 'via', pin: 1 }, to: { node: 'first', pin: 0 } },
-    { id: 'out-2', from: { node: 'via', pin: 3 }, to: { node: 'second', pin: 0 } },
-  ];
-  simulate(nodes, wires);
-  assert.deepEqual(nodes.find(node => node.id === 'via').outputs, [true, true, true, true]);
-  assert.equal(nodes.find(node => node.id === 'first').outputs[0], true);
-  assert.equal(nodes.find(node => node.id === 'second').outputs[0], true);
-});
-
-test('odd inverter feedback advances instead of settling on a false stable state', () => {
+test('odd inverter feedback propagates one gate delay at a time', () => {
   const nodes = [
     { id: 'not-1', type: 'NOT', value: false, inputs: [false], outputs: [false] },
     { id: 'not-2', type: 'NOT', value: false, inputs: [false], outputs: [false] },
     { id: 'not-3', type: 'NOT', value: false, inputs: [false], outputs: [false] },
+    { id: 'led-1', type: 'LED', value: false, inputs: [false], outputs: [false] },
+    { id: 'led-2', type: 'LED', value: false, inputs: [false], outputs: [false] },
+    { id: 'led-3', type: 'LED', value: false, inputs: [false], outputs: [false] },
   ];
   const wires = [
     { id: 'w1', from: { node: 'not-1', pin: 0 }, to: { node: 'not-2', pin: 0 } },
     { id: 'w2', from: { node: 'not-2', pin: 0 }, to: { node: 'not-3', pin: 0 } },
     { id: 'w3', from: { node: 'not-3', pin: 0 }, to: { node: 'not-1', pin: 0 } },
+    { id: 'w4', from: { node: 'not-1', pin: 0 }, to: { node: 'led-1', pin: 0 } },
+    { id: 'w5', from: { node: 'not-2', pin: 0 }, to: { node: 'led-2', pin: 0 } },
+    { id: 'w6', from: { node: 'not-3', pin: 0 }, to: { node: 'led-3', pin: 0 } },
   ];
-  simulate(nodes, wires);
-  assert.deepEqual(nodes.map(node => node.outputs[0]), [true, true, true]);
-  simulate(nodes, wires);
-  assert.deepEqual(nodes.map(node => node.outputs[0]), [false, false, false]);
+  initializeNodeState(nodes); const evaluated = new Set(); let batch = propagationSeeds(nodes, wires);
+  assert.deepEqual(batch, ['not-1']);
+  batch = propagateBatch(nodes, wires, batch, evaluated).nextNodeIds;
+  assert.deepEqual(nodes.slice(0, 3).map(node => node.outputs[0]), [true, false, false]);
+  batch = propagateBatch(nodes, wires, batch, evaluated).nextNodeIds;
+  batch = propagateBatch(nodes, wires, batch, evaluated).nextNodeIds;
+  assert.deepEqual(nodes.slice(0, 3).map(node => node.outputs[0]), [true, false, true]);
+  batch = propagateBatch(nodes, wires, batch, evaluated).nextNodeIds;
+  assert.deepEqual(nodes.slice(0, 3).map(node => node.outputs[0]), [false, false, true]);
+  assert.deepEqual(nodes.slice(3).map(node => node.outputs[0]), [true, false, true]);
 });
 
-test('fan-out destinations execute together in the same simulation interval', () => {
+test('fan-out destinations are scheduled together in the next interval', () => {
   const nodes = [
     { id: 'source', type: 'INPUT' },
     { id: 'left', type: 'BUFFER' },
@@ -88,11 +81,11 @@ test('fan-out destinations execute together in the same simulation interval', ()
     { from: { node: 'left' }, to: { node: 'left-led' } },
     { from: { node: 'right' }, to: { node: 'right-led' } },
   ];
-  assert.deepEqual(executionBatches(nodes, wires), [
-    ['source'],
-    ['left', 'right'],
-    ['left-led', 'right-led'],
-  ]);
+  initializeNodeState(nodes); const evaluated = new Set();
+  const first = propagateBatch(nodes, wires, propagationSeeds(nodes, wires), evaluated);
+  assert.deepEqual(first.nextNodeIds, ['left', 'right']);
+  const second = propagateBatch(nodes, wires, first.nextNodeIds, evaluated);
+  assert.deepEqual(second.nextNodeIds, ['left-led', 'right-led']);
 });
 
 test('4 by 4 LED matrix lights active row and column intersections', () => {
@@ -102,19 +95,4 @@ test('4 by 4 LED matrix lights active row and column intersections', () => {
     false, true, false, true,
     false, false, false, false,
   ]);
-});
-
-test('an animated signal activates every connected via junction', () => {
-  const nodes = [
-    { id: 'source', type: 'INPUT', outputs: [true] },
-    { id: 'via-1', type: 'VIA', outputs: [true, true, true, true] },
-    { id: 'via-2', type: 'VIA', outputs: [true, true, true, true] },
-    { id: 'led', type: 'LED', outputs: [true] },
-  ];
-  const wires = [
-    { from: { node: 'source', pin: 0 }, to: { node: 'via-1', pin: 0 } },
-    { from: { node: 'via-1', pin: 1 }, to: { node: 'via-2', pin: 0 } },
-    { from: { node: 'via-2', pin: 1 }, to: { node: 'led', pin: 0 } },
-  ];
-  assert.deepEqual([...propagatingViaIds(nodes, wires, new Set(['source']))], ['via-1', 'via-2']);
 });

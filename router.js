@@ -120,6 +120,17 @@ export function orthogonalPath(points) {
   return points.reduce((path, point, index) => `${path}${index ? ` L ${point.x} ${point.y}` : `M ${point.x} ${point.y}`}`, '');
 }
 
+export function moveOrthogonalSegment(points, segmentIndex, coordinate) {
+  const moved = points.map(point => ({ ...point }));
+  const horizontal = moved[segmentIndex].y === moved[segmentIndex + 1].y;
+  if (segmentIndex === 0) { moved.splice(1, 0, { ...moved[0] }); segmentIndex++; }
+  if (segmentIndex + 1 === moved.length - 1) moved.splice(segmentIndex + 1, 0, { ...moved[moved.length - 1] });
+  const first = moved[segmentIndex]; const second = moved[segmentIndex + 1];
+  if (horizontal) first.y = second.y = coordinate;
+  else first.x = second.x = coordinate;
+  return moved;
+}
+
 export function directBezierPath(start, end) {
   const controls = bezierControls(start, end);
   return `M ${start.x} ${start.y} C ${controls.first.x} ${controls.first.y} ${controls.second.x} ${controls.second.y} ${end.x} ${end.y}`;

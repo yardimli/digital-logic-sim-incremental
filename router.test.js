@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeWire, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear } from './router.js';
+import { routeWire, orthogonalPath, curvedPath, directBezierPath, directBezierIsClear, moveOrthogonalSegment } from './router.js';
 
 test('wire routing detours around component rectangles', () => {
   const obstacle = { left: 80, right: 140, top: 30, bottom: 90 };
@@ -48,4 +48,11 @@ test('parallel wires choose separate lanes while perpendicular crossings remain 
     }, 0);
   }, 0);
   assert.ok(sharedLength <= 36);
+});
+
+test('orthogonal segments only move perpendicular to their direction', () => {
+  const horizontal = moveOrthogonalSegment([{ x: 0, y: 20 }, { x: 100, y: 20 }], 0, 55);
+  assert.deepEqual(horizontal, [{ x: 0, y: 20 }, { x: 0, y: 55 }, { x: 100, y: 55 }, { x: 100, y: 20 }]);
+  const vertical = moveOrthogonalSegment([{ x: 30, y: 0 }, { x: 30, y: 100 }], 0, 72);
+  assert.deepEqual(vertical, [{ x: 30, y: 0 }, { x: 72, y: 0 }, { x: 72, y: 100 }, { x: 30, y: 100 }]);
 });

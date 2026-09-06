@@ -8,7 +8,6 @@ export const COMPONENTS = {
   NOR:    { category: 'Logic gates', label: 'NOR',  symbol: '¬≥1', detail: 'Inverted OR', hint: 'Outputs HIGH only when A and B are both LOW.', inputs: 2, outputs: 1 },
   XOR:    { category: 'Logic gates', label: 'XOR',  symbol: '=1', detail: 'Inputs differ', hint: 'Outputs HIGH when exactly one input is HIGH.', inputs: 2, outputs: 1 },
   XNOR:   { category: 'Logic gates', label: 'XNOR', symbol: '≡',  detail: 'Inputs match', hint: 'Outputs HIGH when A and B have the same value.', inputs: 2, outputs: 1 },
-  VIA:    { category: 'Routing', label: 'Via', symbol: '◉', detail: 'Four-way junction', hint: 'All four connectors accept or send the same combined signal.', inputs: 4, outputs: 4 },
   BUFFER: { category: 'Routing', label: 'Buffer', symbol: '▷', detail: 'Pass signal', hint: 'Passes the input signal through without changing it.', inputs: 1, outputs: 1 },
   OUTPUT: { category: 'Outputs', label: 'Output', symbol: 'OUT', detail: 'Signal probe', hint: 'Displays the signal received at its input.', inputs: 1, outputs: 0 },
   LED:    { category: 'Outputs', label: 'LED',    symbol: '●', detail: 'Light indicator', hint: 'Lights when its input signal is HIGH.', inputs: 1, outputs: 0 },
@@ -26,7 +25,6 @@ export function evaluate(type, inputs, sourceValue = false) {
     case 'NAND': return [!(inputs[0] && inputs[1])];
     case 'NOR': return [!(inputs[0] || inputs[1])];
     case 'XNOR': return [Boolean(inputs[0]) === Boolean(inputs[1])];
-    case 'VIA': return Array(4).fill(inputs.some(Boolean));
     case 'BUFFER': return [Boolean(inputs[0])];
     case 'OUTPUT':
     case 'LED': return [Boolean(inputs[0])];
@@ -35,17 +33,44 @@ export function evaluate(type, inputs, sourceValue = false) {
   }
 }
 
-export function simulate(nodes, wires, iterations = 32) {
-  const byId = new Map(nodes.map(node => [node.id, node]));
+export function initializeNodeState(nodes) {
   for (const node of nodes) {
     const def = COMPONENTS[node.type];
     if (!Array.isArray(node.inputs) || node.inputs.length !== def.inputs) node.inputs = Array(def.inputs).fill(false);
     const outputCount = def.stateSize ?? Math.max(1, def.outputs);
-    if (!Array.isArray(node.outputs) || node.outputs.length !== outputCount) node.outputs = evaluate(node.type, node.inputs, node.value);
+    if (!Array.isArray(node.outputs) || node.outputs.length !== outputCount) node.outputs = Array(outputCount).fill(false);
   }
+  return nodes;
+}
 
-  const signature = outputs => nodes.map(node => outputs.get(node.id).map(Number).join('')).join('|');
-  const takeStep = outputs => nodes.map(node => {
+export function propagationSeeds(nodes, wires) {
+  const nodeIds = new Set(nodes.map(node => node.id));
+  const incoming = new Map(nodes.map(node => [node.id, 0]));
+  const outgoing = new Map(nodes.map(node => [node.id, []]));
+  for (const wire of wires) {
+    if (!nodeIds.has(wire.from.node) || !nodeIds.has(wire.to.node)) continue;
+    incoming.set(wire.to.node, incoming.get(wire.to.node) + 1);
+    outgoing.get(wire.from.node).push(wire.to.node);
+  }
+  const seeds = nodes.filter(node => incoming.get(node.id) === 0).map(node => node.id);
+  const reached = new Set();
+  const visit = start => {
+    const queue = [start];
+    while (queue.length) {
+      const id = queue.shift(); if (reached.has(id)) continue; reached.add(id);
+      queue.push(...outgoing.get(id));
+    }
+  };
+  for (const id of seeds) visit(id);
+  for (const node of nodes) if (!reached.has(node.id)) { seeds.push(node.id); visit(node.id); }
+  return seeds;
+}
+
+export function propagateBatch(nodes, wires, nodeIds, evaluatedNodeIds = new Set()) {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  initializeNodeState(nodes);
+  const outputs = new Map(nodes.map(node => [node.id, [...node.outputs]]));
+  const results = nodeIds.map(id => byId.get(id)).filter(Boolean).map(node => {
     const def = COMPONENTS[node.type];
     const inputs = Array(def.inputs).fill(false);
     for (const wire of wires) {
@@ -55,77 +80,26 @@ export function simulate(nodes, wires, iterations = 32) {
     }
     return { node, inputs, outputs: evaluate(node.type, inputs, node.value) };
   });
-  const applyStep = step => { for (const result of step) { result.node.inputs = result.inputs; result.node.outputs = result.outputs; } };
-
-  let current = new Map(nodes.map(node => [node.id, [...node.outputs]]));
-  let currentSignature = signature(current);
-  const seen = new Set([currentSignature]);
-  let firstStep = null;
-  let latestStep = null;
-  for (let pass = 0; pass < iterations; pass++) {
-    latestStep = takeStep(current);
-    if (!firstStep) firstStep = latestStep.map(result => ({ ...result, inputs: [...result.inputs], outputs: [...result.outputs] }));
-    const next = new Map(latestStep.map(result => [result.node.id, result.outputs]));
-    const nextSignature = signature(next);
-    if (nextSignature === currentSignature) { applyStep(latestStep); return nodes; }
-    if (seen.has(nextSignature)) { applyStep(firstStep); return nodes; }
-    seen.add(nextSignature); current = next; currentSignature = nextSignature;
+  const nextNodeIds = new Set(); const changedNodeIds = [];
+  for (const result of results) {
+    const firstEvaluation = !evaluatedNodeIds.has(result.node.id);
+    const changed = result.outputs.some((value, index) => value !== result.node.outputs[index]);
+    result.node.inputs = result.inputs; result.node.outputs = result.outputs; evaluatedNodeIds.add(result.node.id);
+    if (changed) changedNodeIds.push(result.node.id);
+    if (firstEvaluation || changed) for (const wire of wires) if (wire.from.node === result.node.id) nextNodeIds.add(wire.to.node);
   }
-  if (latestStep) applyStep(latestStep);
+  return { nextNodeIds: [...nextNodeIds], changedNodeIds };
+}
+
+export function simulate(nodes, wires, iterations = 32) {
+  initializeNodeState(nodes);
+  const evaluated = new Set(); const queue = [propagationSeeds(nodes, wires)];
+  for (let pass = 0; pass < iterations && queue.length; pass++) {
+    const batch = queue.shift(); if (!batch.length) break;
+    const result = propagateBatch(nodes, wires, batch, evaluated);
+    if (result.nextNodeIds.length) queue.push(result.nextNodeIds);
+  }
   return nodes;
-}
-
-export function executionBatches(nodes, wires) {
-  const nodeIds = new Set(nodes.map(node => node.id));
-  const indegree = new Map(nodes.map(node => [node.id, 0]));
-  const outgoing = new Map(nodes.map(node => [node.id, []]));
-  for (const wire of wires) {
-    if (!nodeIds.has(wire.from.node) || !nodeIds.has(wire.to.node)) continue;
-    outgoing.get(wire.from.node).push(wire.to.node);
-    indegree.set(wire.to.node, indegree.get(wire.to.node) + 1);
-  }
-
-  let wave = nodes.filter(node => indegree.get(node.id) === 0).map(node => node.id);
-  const batches = [];
-  const scheduled = new Set();
-  while (wave.length) {
-    batches.push(wave);
-    const nextWave = [];
-    for (const id of wave) {
-      scheduled.add(id);
-      for (const target of outgoing.get(id)) {
-        indegree.set(target, indegree.get(target) - 1);
-        if (indegree.get(target) === 0) nextWave.push(target);
-      }
-    }
-    wave = nextWave;
-  }
-
-  const feedbackNodes = nodes.filter(node => !scheduled.has(node.id)).map(node => node.id);
-  if (feedbackNodes.length) batches.push(feedbackNodes);
-  return batches;
-}
-
-export function propagatingViaIds(nodes, wires, runningNodeIds) {
-  const byId = new Map(nodes.map(node => [node.id, node]));
-  const running = runningNodeIds instanceof Set ? runningNodeIds : new Set(runningNodeIds);
-  const animated = new Set();
-  for (const wire of wires) {
-    const source = byId.get(wire.from.node);
-    if (!source || !running.has(source.id) || !source.outputs?.[wire.from.pin]) continue;
-    if (source.type === 'VIA') animated.add(source.id);
-    const target = byId.get(wire.to.node); if (target?.type === 'VIA') animated.add(target.id);
-  }
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const wire of wires) {
-      const source = byId.get(wire.from.node); const target = byId.get(wire.to.node);
-      if (source?.type === 'VIA' && animated.has(source.id) && target?.type === 'VIA' && !animated.has(target.id)) { animated.add(target.id); changed = true; }
-      if (target?.type === 'VIA' && animated.has(target.id) && source?.type === 'VIA' && !animated.has(source.id)) { animated.add(source.id); changed = true; }
-    }
-  }
-  return animated;
 }
 
 export function makeExample() {
